@@ -1,0 +1,3472 @@
+import os
+import random
+import re
+import string
+import time
+import threading
+import json
+import uuid
+import requests
+from urllib.parse import quote
+from telebot import types
+import telebot
+from supabase import create_client, Client
+from datetime import datetime
+
+# ==========================================
+# 1. إعدادات البوت والـ API والمسؤولين
+# ==========================================
+TOKEN = os.environ.get("TOKEN", '8886482040:AAEzImc8dOE0ZBbsBD7mxpr5mcWaYDItyNc')
+bot = telebot.TeleBot(TOKEN)
+
+ADMIN_ID = 8758665082
+SUPPORT_LINK = 'https://t.me/ppppp5e'
+SUPPORT_USER = '@ppppp5e'
+PROOFS_CHANNEL = "@almohlgm"
+RECEIVER_PHONE = "07716465605"
+
+USDT_WALLET_ADDRESS = "TYourUSDTWalletAddressHere..."  
+USDT_TO_POINTS_RATE = 10  
+
+CHANNELS = ["@almohlgm", "@QPQQQQQQQQQQQ"]
+CHANNEL_LINKS = ["https://t.me/almohlgm", "https://t.me/QPQQQQQQQQQQQ"]
+
+API_URL = "https://darkfollow.shop/api/v2"
+API_KEY = os.environ.get("API_KEY", "Ig1FjwBweH3inDwnjLvv7Dt1ZzVRoKKNMF7QysS9UT0sSINTUKmWYdohsm3U")
+
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://iwkszjsggdddiaotlzrk.supabase.co")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# ==========================================
+# إعدادات آسيا سيل المباشر (API)
+# ==========================================
+device_id = str(uuid.uuid4())
+api_key_asia = ''.join(random.choices(string.hexdigits.lower(), k=32))
+ASIA_BASE_URL = "https://odpapp.asiacell.com/api/v1/"
+
+admin_asia_data = {
+    'admin_asia_phone': None,
+    'admin_asia_access_token': None,
+    'admin_asia_pid': None,
+    'pending_transfers': {},
+    'current_transfer_target_user': None
+}
+
+user_click_tracker = {}
+pending_orders_cache = {}  
+transfer_cache = {}        
+user_carts = {}            
+maintenance_items = set()  
+temp_add_service = {}      
+admin_states = {}          
+user_recharge_states = {} 
+usdt_recharge_states = {}
+
+PROFIT_MARGIN_USD = 0.5    
+try:
+    supabase.table("users").update({"is_banned": 0}).eq("user_id", ADMIN_ID).execute()
+except Exception:
+    pass
+
+http_session = requests.Session()
+http_session.headers.update({
+    'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+    'Accept': 'application/json, text/javascript, */*; q=0.01',
+    'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+    'Origin': 'https://darkfollow.shop',
+    'Referer': 'https://darkfollow.shop/'
+})
+
+# ==========================================
+# دالة الألوان الموحدة (أخضر لجميع الأزرار، أحمر للأزرار المحددة)
+# ==========================================
+def get_item_style(item_key):
+    # الأزرار باللون الأحمر حصراً حسب الطلب
+    red_buttons = ['asiacell_recharge_menu', 'support_btn', 'agents_btn']
+    if item_key in red_buttons or item_key == SUPPORT_LINK:
+        return "danger"
+    
+    # بقية الأزرار والخدمات والأقسام باللون الأخضر
+    return "success"
+
+def get_asia_headers(access_token=None):
+    current_headers = {
+        'User-Agent': "okhttp/5.0.0-alpha.2",
+        'Connection': "Keep-Alive",
+        'Accept-Encoding': "gzip",
+        'X-ODP-API-KEY': api_key_asia,
+        'Cache-Control': "no-cache",
+        'DeviceID': device_id,
+        'X-OS-Version': "11",
+        'X-Device-Type': "[Android][realme][RMX3834 11][TIRAMISU][HMS][4.3.7:90000325]",
+        'X-ODP-APP-VERSION': "4.3.7",
+        'X-FROM-APP': "odp",
+        'X-ODP-CHANNEL': "mobile",
+        'X-SCREEN-TYPE': "false",
+        'Content-Type': "application/json; charset=UTF-8"
+    }
+    if access_token:
+        current_headers['Authorization'] = f"Bearer {access_token}"
+    return current_headers
+
+def send_asia_login_request(phone_number_to_login):
+    url_login = f"{ASIA_BASE_URL}login?lang=en"
+    payload_login = {"captchaCode": "", "username": phone_number_to_login}
+    res_login = requests.post(url_login, data=json.dumps(payload_login), headers=get_asia_headers())
+    return res_login.json()
+
+def send_asia_sms_validation_request(pid_value, passcode_value):
+    url_verify = f"{ASIA_BASE_URL}smsvalidation?lang=en"
+    payload_verify = {"PID": pid_value, "passcode": passcode_value, "token": ""}
+    res_verify = requests.post(url_verify, data=json.dumps(payload_verify), headers=get_asia_headers())
+    return res_verify.json()
+
+def send_asia_credit_transfer_start_request(amount_value, receiver_msisdn, admin_access_token):
+    url_start_transfer = f"{ASIA_BASE_URL}credit-transfer/start?lang=ar"
+    payload_start = {"amount": amount_value, "receiverMsisdn": receiver_msisdn}
+    res_start = requests.post(url_start_transfer, data=json.dumps(payload_start), headers=get_asia_headers(admin_access_token))
+    return res_start.json()
+
+def send_asia_credit_transfer_confirm_request(pid_transfer_value, transfer_passcode_value, admin_access_token):
+    url_confirm = f"{ASIA_BASE_URL}credit-transfer/do-transfer?lang=ar"
+    payload_confirm = {"PID": pid_transfer_value, "passcode": transfer_passcode_value}
+    res_confirm = requests.post(url_confirm, data=json.dumps(payload_confirm), headers=get_asia_headers(admin_access_token))
+    return res_confirm.json()
+
+def check_spam(user_id):
+    if user_id == ADMIN_ID: return False
+    now = time.time()
+    user_click_tracker.setdefault(user_id, [])
+    user_click_tracker[user_id] = [t for t in user_click_tracker[user_id] if now - t < 3]
+    user_click_tracker[user_id].append(now)
+    if len(user_click_tracker[user_id]) > 5:
+        try:
+            supabase.table("users").update({"is_banned": 1}).eq("user_id", user_id).execute()
+            bot.send_message(user_id, "❌ **تم حظرك تلقائياً بسبب السبام!**", parse_mode="Markdown")
+        except Exception: pass
+        return True
+    return False
+
+def send_to_api(service_id, link, quantity):
+    try:
+        payload = {
+            'key': API_KEY,
+            'action': 'add',
+            'service': str(service_id),
+            'link': str(link),
+            'quantity': str(quantity)
+        }
+        response = http_session.post(API_URL, data=payload, timeout=20)
+        res_json = response.json()
+        if "error" in res_json:
+            return {"error": res_json["error"]}
+        if "order" in res_json:
+            return res_json
+        return {"error": f"رد غير متوقع من السيرفر ({response.status_code}): {response.text[:100]}"}
+    except Exception as e:
+        return {"error": f"فشل الاتصال: {str(e)}"}
+
+def get_status(order_id):
+    try:
+        payload = {'key': API_KEY, 'action': 'status', 'order': str(order_id)}
+        response = http_session.post(API_URL, data=payload, timeout=15)
+        return response.json()
+    except Exception as e:
+        return {"error": str(e)}
+
+def get_api_balance():
+    try:
+        payload = {'key': API_KEY, 'action': 'balance'}
+        response = http_session.post(API_URL, data=payload, timeout=15)
+        return response.json()
+    except Exception as e:
+        return {"error": str(e)}
+
+def get_service_min_max(service_id):
+    try:
+        payload = {'key': API_KEY, 'action': 'services'}
+        response = http_session.post(API_URL, data=payload, timeout=15)
+        services = response.json()
+        if isinstance(services, list):
+            for srv in services:
+                if str(srv.get('service')) == str(service_id):
+                    return int(srv.get('min', 1)), int(srv.get('max', 1000000))
+    except Exception as e:
+        print(f"Error fetching min/max: {e}")
+    return 1, 1000000
+
+def sync_prices_from_api_logic():
+    try:
+        payload = {'key': API_KEY, 'action': 'services'}
+        response = http_session.post(API_URL, data=payload, timeout=20)
+        
+        if 'application/json' not in response.headers.get('Content-Type', ''):
+            return False, "رد غير صالح من المزود"
+            
+        api_services = response.json()
+        
+        if isinstance(api_services, list):
+            updated_count = 0
+            for srv in api_services:
+                s_id = srv.get('service')
+                base_rate = float(srv.get('rate', 0))
+                new_calculated_price = round(base_rate + PROFIT_MARGIN_USD, 2)
+                
+                for k, v in SERVICES.items():
+                    if str(v.get('service_id')) == str(s_id):
+                        if 'price' in v and not v.get('tiers') and not v.get('custom_tiers'):
+                            v['price'] = new_calculated_price
+                            updated_count += 1
+                        
+                        tiers_key = 'tiers' if 'tiers' in v else ('custom_tiers' if 'custom_tiers' in v else None)
+                        if tiers_key and isinstance(v[tiers_key], list):
+                            for tier in v[tiers_key]:
+                                q = tier.get('qty', 1000)
+                                calculated_tier_price = (base_rate + PROFIT_MARGIN_USD) * (q / 1000.0)
+                                tier['price'] = round(calculated_tier_price, 2)
+                            
+                            updated_count += 1
+                            
+                            if k.startswith('custom_srv_'):
+                                try:
+                                    custom_only = {item_k: item_v for item_k, item_v in SERVICES.items() if item_k.startswith('custom_srv_')}
+                                    supabase.table("settings").upsert({
+                                        "key": "custom_services_list",
+                                        "val_text": json.dumps(custom_only, ensure_ascii=False)
+                                    }, on_conflict="key").execute()
+                                except Exception as db_e:
+                                    print(f"Error saving custom tiers to DB during sync: {db_e}")
+
+            return True, updated_count
+        elif isinstance(api_services, dict) and "error" in api_services:
+            return False, api_services["error"]
+        return False, "رد غير متوقع من المزود"
+    except Exception as e:
+        return False, str(e)
+
+def check_broken_services_logic():
+    try:
+        payload = {'key': API_KEY, 'action': 'services'}
+        response = http_session.post(API_URL, data=payload, timeout=20)
+        
+        if 'application/json' not in response.headers.get('Content-Type', ''):
+            return False, "❌ تعذر الاتصال بالمزود لجلب القائمة."
+            
+        api_services = response.json()
+        if not isinstance(api_services, list):
+            return False, "❌ رد غير صالح من المزود."
+            
+        active_api_ids = {str(srv.get('service')) for srv in api_services}
+        broken_services = []
+        
+        for k, v in SERVICES.items():
+            srv_api_id = v.get('service_id')
+            if srv_api_id is not None and str(srv_api_id) != "0":
+                if str(srv_api_id) not in active_api_ids:
+                    broken_services.append({
+                        'key': k,
+                        'name': v.get('name', 'خدمة بدون اسم'),
+                        'service_id': srv_api_id,
+                        'category': v.get('category', 'غير محدد')
+                    })
+                    
+        return True, broken_services
+    except Exception as e:
+        return False, f"❌ خطأ أثناء فحص الآديات: {str(e)}"
+
+def background_broken_services_monitor():
+    while True:
+        try:
+            time.sleep(14400)
+            success, result = check_broken_services_logic()
+            if success and result:
+                for item in result:
+                    alert_msg = (
+                        f"🚨 **تنبيه هام (خدمة محذوفة من الموقع)!**\n"
+                        f"━━━━━━━━━━━━━━━━━━━\n\n"
+                        f"❌ تم ملاحظة أن الآيدي الخاص بالخدمة:\n"
+                        f"📦 **{item['name']}**\n"
+                        f"🆔 **API ID:** `{item['service_id']}`\n\n"
+                        f"⚠️ **تم حذفه من الموقع، يرجى مراجعة البوت وحذفها!**"
+                    )
+                    try:
+                        bot.send_message(ADMIN_ID, alert_msg, parse_mode="Markdown")
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"Background monitor error: {e}")
+
+threading.Thread(target=background_broken_services_monitor, daemon=True).start()
+
+def validate_service_link(service_category, link):
+    link_lower = link.lower()
+    
+    if service_category == 'cat_telegram':
+        if 't.me/' in link_lower or link_lower.startswith('@') or len(link.strip()) >= 3:
+            return True, "صالح"
+        return False, "❌ عذراً، يرجى إرسال معرف قناة صحيح (يبدأ بـ @) أو رابط صحيح."
+
+    if not link.startswith('http') and service_category != 'cat_games':
+        return False, "⚠️ الرابط المدخل غير صحيح! يجب أن يبدأ الرابط بـ https://"
+        
+    if service_category == 'cat_insta':
+        if 'instagram.com' not in link_lower:
+            return False, "❌ عذراً، هذا القسم خاص بالانستغرام فقط! يرجى إرسال رابط صحيح."
+    elif service_category == 'cat_games':
+        if len(link.strip()) < 3:
+            return False, "❌ الآيدي المدخل قصير جداً أو غير صالح!"
+            
+    return True, "صالح"
+
+def check_order_live_status(order_id, api_order_id):
+    if str(api_order_id) == "0" or not str(api_order_id).isdigit():
+        return "📦 الطلب يدوي / قيد المعالجة من قبل الدعم."
+    res_status = get_status(api_order_id)
+    if res_status and isinstance(res_status, dict) and 'status' in res_status:
+        st = res_status['status']
+        rem = res_status.get('remains', 'غير محدد')
+        start_cnt = res_status.get('start_count', 'غير محدد')
+        return f"📌 الحالة بالمزود: <b>{st}</b>\n📉 العدد المتبقي: `{rem}`\n📊 العدد الابتدائي: `{start_cnt}`"
+    return "⚠️ متعذر جلب الحالة من المزود حالياً."
+
+def get_user(user_id):
+    try:
+        res = supabase.table("users").select("*").eq("user_id", user_id).execute()
+        if res.data:
+            return res.data[0]
+        return None
+    except Exception as e:
+        print(f"Error fetching user: {e}")
+        return None
+        
+def find_user_by_id_or_username(query_str):
+    clean_query = str(query_str).strip().replace('@', '').lower()
+    try:
+        if clean_query.isdigit():
+            res = supabase.table("users").select("*").eq("user_id", int(clean_query)).execute()
+            if res.data:
+                return res.data[0]
+        
+        res_user = supabase.table("users").select("*").ilike("username", f"%{clean_query}%").execute()
+        if res_user.data:
+            return res_user.data[0]
+    except Exception as e:
+        print(f"Search user error: {e}")
+    return None
+
+def get_points(user_id):
+    u = get_user(user_id)
+    return round(float(u['points']), 2) if u and 'points' in u and u['points'] is not None else 0.0
+
+def update_points(user_id, amount, is_recharge=False):
+    u = get_user(user_id)
+    if u:
+        current = float(u['points']) if 'points' in u and u['points'] is not None else 0.0
+        new_points = round(current + float(amount), 2)
+        update_data = {"points": new_points}
+        if is_recharge and amount > 0:
+            old_recharged = float(u.get('total_recharged', 0.0) or 0.0)
+            update_data["total_recharged"] = round(old_recharged + float(amount), 2)
+        supabase.table("users").update(update_data).eq("user_id", user_id).execute()
+    else:
+        new_points = max(0.0, float(amount))
+        data = {"user_id": user_id, "points": new_points}
+        if is_recharge and amount > 0:
+            data["total_recharged"] = float(amount)
+        supabase.table("users").insert(data).execute()
+
+def is_banned(user_id):
+    u = get_user(user_id)
+    return bool(u.get('is_banned', 0)) if u else False
+
+def is_maintenance():
+    try:
+        res = supabase.table("settings").select("val").eq("key", "maintenance").execute()
+        if res.data:
+            return bool(res.data[0]['val'])
+        return False
+    except Exception:
+        return False
+
+def toggle_maintenance():
+    curr = is_maintenance()
+    new_val = 0 if curr else 1
+    try:
+        supabase.table("settings").upsert({"key": "maintenance", "val": new_val}).execute()
+    except Exception as e:
+        print(f"Error toggling maintenance: {e}")
+    return new_val
+
+def is_item_in_maintenance(item_key):
+    return item_key in maintenance_items
+
+def toggle_item_maintenance(item_key):
+    if item_key in maintenance_items:
+        maintenance_items.remove(item_key)
+        return False
+    else:
+        maintenance_items.add(item_key)
+        return True
+
+def get_menu_description(menu_key, default_text=""):
+    try:
+        res = supabase.table("settings").select("val_text").eq("key", f"desc_{menu_key}").execute()
+        if res.data and res.data[0].get('val_text'):
+            txt = str(res.data[0]['val_text']).strip()
+            if txt:
+                return txt
+    except Exception as e:
+        print(f"Get description error: {e}")
+    return default_text
+
+def set_menu_description(menu_key, text):
+    try:
+        supabase.table("settings").upsert({"key": f"desc_{menu_key}", "val_text": str(text).strip()}).execute()
+    except Exception as e:
+        print(f"Error setting description: {e}")
+
+def get_user_level(user_id):
+    u = get_user(user_id)
+    if u and u.get('is_reseller') == 1:
+        return {"title": "🕶️ وكيل معتمد", "discount": 0.08}
+    spent = float(u['total_spent']) if u and 'total_spent' in u and u['total_spent'] else 0.0
+    if spent >= 300: return {"title": "🏆 VIP", "discount": 0.05}
+    elif spent >= 200: return {"title": "💎 تاجر محترف", "discount": 0.04}
+    elif spent >= 150: return {"title": "🥇 تاجر جيد", "discount": 0.03}
+    elif spent >= 100: return {"title": "🥈 تاجر", "discount": 0.02}
+    elif spent >= 50: return {"title": "🥉 تاجر مبتدئ", "discount": 0.01}
+    else: return {"title": "👤 مستخدم عادي", "discount": 0.0}
+
+def get_service_price(user_id, base_price):
+    level_info = get_user_level(user_id)
+    discount = level_info['discount']
+    return round(base_price * (1 - discount), 2)
+
+def promote_user_to_reseller(admin_id, target_uid):
+    if admin_id != ADMIN_ID:
+        return
+    try:
+        supabase.table("users").update({"is_reseller": 1}).eq("user_id", target_uid).execute()
+        bot.send_message(admin_id, f"✅ تم ترقية المستخدم (`{target_uid}`) إلى رتبة وكيل معتمد بنجاح!")
+        bot.send_message(target_uid, "🏆 **مبروك! تم ترقية حسابك إلى رتبة (وكيل معتمد) في البوت وتحصل الآن على تخفيضات إضافية ضخمة على جميع الخدمات!**", parse_mode="Markdown")
+    except Exception as e:
+        print(f"Error promoting reseller: {e}")
+
+def demote_user_from_reseller(admin_id, target_uid):
+    if admin_id != ADMIN_ID:
+        return
+    try:
+        supabase.table("users").update({"is_reseller": 0}).eq("user_id", target_uid).execute()
+        bot.send_message(admin_id, f"✅ تم إزالة رتبة (وكيل معتمد) عن المستخدم (`{target_uid}`) بنجاح!")
+        bot.send_message(target_uid, "⚠️ **تنبيه: تم تغيير رتبة حسابك وإلغاء صفة (وكيل معتمد) من البوت.**", parse_mode="Markdown")
+    except Exception as e:
+        print(f"Error demoting reseller: {e}")
+        
+def get_next_order_id():
+    try:
+        res = supabase.table("orders").select("last_id").eq("id", 1).execute()
+        if res.data:
+            next_id = res.data[0]['last_id'] + 1
+            supabase.table("orders").update({"last_id": next_id}).eq("id", 1).execute()
+            return next_id
+        else:
+            supabase.table("orders").insert({"id": 1, "last_id": 100}).execute()
+            return 100
+    except Exception:
+        return int(time.time())
+
+def save_order(order_id, user_id, username, service, price, api_order_id="0", link="خدمة مباشرة", service_id=0, qty=1):
+    try:
+        supabase.table("user_orders").insert({
+            "order_id": order_id,
+            "api_order_id": str(api_order_id),
+            "user_id": user_id,
+            "username": username,
+            "service": service,
+            "price": price,
+            "link": link,
+            "service_id": service_id,
+            "quantity": qty,
+            "status": "قيد التنفيذ",
+            "created_at_ts": int(time.time())
+        }).execute()
+        
+        u = get_user(user_id)
+        if u:
+            old_spent = float(u.get('total_spent', 0)) if u.get('total_spent') is not None else 0.0
+            new_spent = old_spent + float(price)
+            supabase.table("users").update({"total_spent": new_spent, "last_order_ts": int(time.time())}).eq("user_id", user_id).execute()
+    except Exception as e:
+        print(f"Error saving order: {e}")
+
+SERVICES = {
+    'buy_esim_month': {'name': 'شريحة eSIM شهر', 'btn_label': 'شهر', 'price': 15.0, 'cost': 10.0, 'service_id': 0, 'qty': 1, 'category': 'cat_esim'},
+    'buy_esim_week': {'name': 'شريحة eSIM أسبوع', 'btn_label': 'أسبوع', 'price': 5.0, 'cost': 3.0, 'service_id': 0, 'qty': 1, 'category': 'cat_esim'},
+
+    'buy_itunes_2': {'name': 'بطاقة آيتونز 2$', 'btn_label': '2$', 'price': 3.5, 'cost': 2.2, 'service_id': 0, 'qty': 1, 'category': 'cat_itunes'},
+    'buy_itunes_3': {'name': 'بطاقة آيتونز 3$', 'btn_label': '3$', 'price': 5.0, 'cost': 3.2, 'service_id': 0, 'qty': 1, 'category': 'cat_itunes'},
+    'buy_itunes_4': {'name': 'بطاقة آيتونز 4$', 'btn_label': '4$', 'price': 6.5, 'cost': 4.2, 'service_id': 0, 'qty': 1, 'category': 'cat_itunes'},
+    'buy_itunes_5': {'name': 'بطاقة آيتونز 5$', 'btn_label': '5$', 'price': 7.5, 'cost': 5.2, 'service_id': 0, 'qty': 1, 'category': 'cat_itunes'},
+    'buy_itunes_15': {'name': 'بطاقة آيتونز 15$', 'btn_label': '15$', 'price': 22.0, 'cost': 15.5, 'service_id': 0, 'qty': 1, 'category': 'cat_itunes'},
+
+    'pubg_60': {'name': '🟡 60 شدة ببجي', 'btn_label': '60 UC', 'price': 1.5, 'cost': 1.0, 'service_id': 0, 'qty': 1, 'category': 'cat_games', 'msg': '🎮 **أرسل آيدي حسابك في ببجي (Player ID) واسمك داخل اللعبة:**'},
+    'pubg_120': {'name': '🟡 120 شدة ببجي', 'btn_label': '120 UC', 'price': 2.9, 'cost': 2.0, 'service_id': 0, 'qty': 1, 'category': 'cat_games', 'msg': '🎮 **أرسل آيدي حسابك في ببجي (Player ID) واسمك داخل اللعبة:**'},
+    'pubg_180': {'name': '🟡 180 شدة ببجي', 'btn_label': '180 UC', 'price': 4.0, 'cost': 3.0, 'service_id': 0, 'qty': 1, 'category': 'cat_games', 'msg': '🎮 **أرسل آيدي حسابك في ببجي (Player ID) واسمك داخل اللعبة:**'},
+    'pubg_336': {'name': '👑 336 شدة ببجي', 'btn_label': '336 UC', 'price': 7.0, 'cost': 5.0, 'service_id': 0, 'qty': 1, 'category': 'cat_games', 'msg': '🎮 **أرسل آيدي حسابك في ببجي (Player ID) واسمك داخل اللعبة:**'},
+    'pubg_688': {'name': '🔥 688 شدة ببجي', 'btn_label': '688 UC', 'price': 13.0, 'cost': 10.0, 'service_id': 0, 'qty': 1, 'category': 'cat_games', 'msg': '🎮 **أرسل آيدي حسابك في ببجي (Player ID) واسمك داخل اللعبة:**'},
+    'pubg_1170': {'name': '💎 1170 شدة ببجي', 'btn_label': '1170 UC', 'price': 22.0, 'cost': 17.0, 'service_id': 0, 'qty': 1, 'category': 'cat_games', 'msg': '🎮 **أرسل آيدي حسابك في ببجي (Player ID) واسمك داخل اللعبة:**'},
+
+    'ff_100': {'name': '🔴 100 جوهرة فري فاير', 'btn_label': '100 💎', 'price': 2.3, 'cost': 1.2, 'service_id': 0, 'qty': 1, 'category': 'cat_games', 'msg': '🔥 **أرسل آيدي حسابك في فري فاير (Player ID) واسمك باللعبة:**'},
+    'ff_210': {'name': '🔴 210 جوهرة فري فاير', 'btn_label': '210 💎', 'price': 4.0, 'cost': 2.5, 'service_id': 0, 'qty': 1, 'category': 'cat_games', 'msg': '🔥 **أرسل آيدي حسابك في فري فاير (Player ID) واسمك باللعبة:**'},
+    'ff_530': {'name': '🔴 530 جوهرة فري فاير', 'btn_label': '530 💎', 'price': 8.5, 'cost': 6.0, 'service_id': 0, 'qty': 1, 'category': 'cat_games', 'msg': '🔥 **أرسل آيدي حسابك في فري فاير (Player ID) واسمك باللعبة:**'},
+    'ff_1080': {'name': '💎 1080 جوهرة فري فاير', 'btn_label': '1080 💎', 'price': 16.5, 'cost': 12.0, 'service_id': 0, 'qty': 1, 'category': 'cat_games', 'msg': '🔥 **أرسل آيدي حسابك في فري فاير (Player ID) واسمك باللعبة:**'},
+
+    'ludo_100': {'name': '🎲 100 مجوهرة لودو', 'btn_label': '100 🎲', 'price': 2.5, 'cost': 1.5, 'service_id': 0, 'qty': 1, 'category': 'cat_games', 'msg': '🎲 **أرسل آيدي حسابك في لودو (Player ID):**'},
+    'ludo_500': {'name': '🎲 500 مجوهرة لودو', 'btn_label': '500 🎲', 'price': 9.0, 'cost': 6.5, 'service_id': 0, 'qty': 1, 'category': 'cat_games', 'msg': '🎲 **أرسل آيدي حسابك في لودو (Player ID):**'},
+
+    'coc_500': {'name': '⚔️ 500 مجوهرة كلاش', 'btn_label': '500 ⚔️', 'price': 8.0, 'cost': 5.5, 'service_id': 0, 'qty': 1, 'category': 'cat_games', 'msg': '⚔️ **أرسل آيدي تاغ حسابك بـ كلاش (#Tag) واسمك:**'},
+    'coc_1200': {'name': '⚔️ 1200 مجوهرة كلاش', 'btn_label': '1200 ⚔️', 'price': 17.0, 'cost': 13.0, 'service_id': 0, 'qty': 1, 'category': 'cat_games', 'msg': '⚔️ **أرسل آيدي تاغ حسابك بـ كلاش (#Tag) واسمك:**'}
+}
+
+def load_custom_services_from_db():
+    try:
+        res_del_srvs = supabase.table("deleted_services").select("srv_key").execute()
+        deleted_keys = {row['srv_key'] for row in res_del_srvs.data} if res_del_srvs.data else set()
+
+        res = supabase.table("settings").select("val_text").eq("key", "custom_services_list").execute()
+        if res.data and res.data[0].get('val_text'):
+            txt = res.data[0]['val_text']
+            if txt:
+                saved_services = json.loads(txt)
+                updated_saved_dict = {}
+                
+                for k, v in saved_services.items():
+                    if k in deleted_keys:
+                        continue
+                    if 'is_custom_tiers' not in v and 'tiers' in v:
+                        v['is_custom_tiers'] = True
+                    SERVICES[k] = v
+                    updated_saved_dict[k] = v
+
+                if len(saved_services) != len(updated_saved_dict):
+                    supabase.table("settings").upsert({
+                        "key": "custom_services_list",
+                        "val_text": json.dumps(updated_saved_dict, ensure_ascii=False) if updated_saved_dict else ""
+                    }, on_conflict="key").execute()
+    except Exception as e:
+        print(f"Error loading custom services: {e}")
+
+load_custom_services_from_db()
+
+CATEGORIES = {
+    'cat_games': 'قسم الشحن والألعاب 🎮',
+    'cat_insta': 'قسم الانستغرام 📸',
+    'cat_telegram': 'قسم التليجرام ✈️',
+    'cat_itunes': 'قسم آيتونز 🍎',
+    'cat_esim': 'قسم شرائح eSIM 📱'
+}
+
+SUB_CATEGORIES = {}
+
+def load_sub_categories_from_db():
+    try:
+        res = supabase.table("settings").select("val_text").eq("key", "custom_sub_categories").execute()
+        if res.data and res.data[0].get('val_text'):
+            txt = res.data[0]['val_text']
+            if txt:
+                global SUB_CATEGORIES
+                SUB_CATEGORIES = json.loads(txt)
+    except Exception as e:
+        print(f"Error loading sub-categories: {e}")
+
+load_sub_categories_from_db()
+
+try:
+    res_del_cats = supabase.table("deleted_categories").select("cat_key").execute()
+    if res_del_cats.data:
+        for row in res_del_cats.data:
+            bc = row.get('cat_key')
+            if bc in CATEGORIES:
+                del CATEGORIES[bc]
+except Exception as e:
+    print(f"Error loading deleted categories: {e}")
+
+try:
+    res_del_srvs = supabase.table("deleted_services").select("srv_key").execute()
+    if res_del_srvs.data:
+        for row in res_del_srvs.data:
+            b_srv = row.get('srv_key')
+            if b_srv in SERVICES:
+                del SERVICES[b_srv]
+except Exception as e:
+    print(f"Error loading deleted services: {e}")
+
+def admin_panel_shortcut(chat_id, message_id=None):
+    m_status = "مفعل 🛠️" if is_maintenance() else "معطل 🟢"
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("➕/❌ إدارة الأقسام والخدمات", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')),
+        types.InlineKeyboardButton("🏷️ الأسعار والمالية", callback_data='adm_menu_finance', style=get_item_style('adm_menu_finance')),
+        types.InlineKeyboardButton("👥 إدارة المستخدمين والوكلاء", callback_data='adm_menu_users', style=get_item_style('adm_menu_users')),
+        types.InlineKeyboardButton("🎟️ الكروت والمسابقات", callback_data='adm_menu_promos', style=get_item_style('adm_menu_promos')),
+        types.InlineKeyboardButton("⚙️ النظام والإذاعة", callback_data='adm_menu_system', style=get_item_style('adm_menu_system')),
+        types.InlineKeyboardButton("🛠️ صيانة الأزرار والأقسام الشاملة", callback_data='adm_maint_control_menu', style=get_item_style('adm_maint_control_menu')),
+        types.InlineKeyboardButton("🎨 تعديل ألوان الأقسام والخدمات", callback_data='adm_select_item_to_recolor', style=get_item_style('adm_select_item_to_recolor')),
+        types.InlineKeyboardButton("📱 لوحة تحكم آسيا (أدمن)", callback_data='admin_asiacell_panel', style=get_item_style('admin_asiacell_panel')),
+        types.InlineKeyboardButton("🔄 موافقات الشحن المعلقة", callback_data='admin_view_pending_transfers', style=get_item_style('admin_view_pending_transfers')),
+        types.InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data='start', style=get_item_style('start'))
+    )
+    text = (
+        f"🛠️ **لوحة تحكم الإدارة الشاملة (الرئيسية):**\n"
+        f"━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📌 **وضع صيانة البوت الكلي:** {m_status}\n"
+        f"اختر القسم المطلوب للتعديل عليه:"
+    )
+    if message_id:
+        try:
+            bot.edit_message_text(text, chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+        except Exception:
+            bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+    else:
+        bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+
+def notify_admin_new_user(user_id, first_name, username):
+    try:
+        safe_username = f"@{username}" if username and username != "لا يوجد" else "لا يوجد يوزر"
+        safe_name = str(first_name).replace('[', '').replace(']', '').replace('*', '').replace('_', '')
+        
+        total_users = 0
+        try:
+            res_u = supabase.table("users").select("user_id", count="exact", head=True).execute()
+            total_users = res_u.count if res_u.count is not None else 0
+        except Exception:
+            pass
+
+        text = (
+            f"👤 عضو جديد دخل البوت لأول مرة!\n"
+            f"━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🔹 الاسم: {safe_name}\n"
+            f"🔹 اليوزر: {safe_username}\n"
+            f"🔹 الآيدي (ID): {user_id}\n"
+            f"👥 إجمالي المشتركين بالبوت: `{total_users}` عضو"
+        )
+        bot.send_message(ADMIN_ID, text, parse_mode="Markdown")
+    except Exception as e:
+        print(f"❌ Failed to send admin notification: {e}")
+
+def prepare_order_summary_direct(message, base_price, data_name):
+    chat_id = message.chat.id
+    raw_text = message.text or ""
+    
+    pending_orders_cache[chat_id] = {
+        'service_id': 0,
+        'qty': 1,
+        'name': data_name,
+        'price': base_price,
+        'link': raw_text.strip()
+    }
+    send_order_confirmation_screen(chat_id)
+
+def prepare_order_summary(message, base_price, service_id, quantity, data_name):
+    chat_id = message.chat.id
+    raw_text = message.text or ""
+    
+    service_cat = 'cat_insta'
+    for k, v in SERVICES.items():
+        if v.get('service_id') == service_id:
+            service_cat = v.get('category', 'cat_insta')
+            break
+            
+    is_valid, err_msg = validate_service_link(service_cat, raw_text)
+    if not is_valid:
+        bot.send_message(chat_id, err_msg)
+        return
+
+    urls = re.findall(r'https?://[^\s\)\],]+', raw_text)
+    clean_link = urls[0].split('?')[0] if urls else raw_text.strip()
+
+    pending_orders_cache[chat_id] = {
+        'service_id': service_id,
+        'qty': quantity,
+        'name': data_name,
+        'price': base_price,
+        'link': clean_link
+    }
+    send_order_confirmation_screen(chat_id)
+
+def send_order_confirmation_screen(chat_id):
+    order_data = pending_orders_cache.get(chat_id)
+    if not order_data:
+        return
+    markup_confirm = types.InlineKeyboardMarkup(row_width=1)
+    markup_confirm.add(
+        types.InlineKeyboardButton("🛒 إضافة لسلة المشتريات", callback_data='add_to_cart_now', style=get_item_style('add_to_cart_now')),
+        types.InlineKeyboardButton("✅ تأكيد الشراء الآن", callback_data='confirm_order_now', style=get_item_style('confirm_order_now')),
+        types.InlineKeyboardButton("❌ إلغاء الطلب", callback_data='cancel_order_now', style=get_item_style('cancel_order_now'))
+    )
+    text_confirm = (
+        f"🧾 **تأكيد ملخص الطلب:**\n"
+        f"━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📦 المنتج: {order_data['name']}\n"
+        f"🔗 التفاصيل/الرابط: `{order_data['link']}`\n"
+        f"💰 السعر النهائي: `{order_data['price']}` نقطة"
+    )
+    bot.send_message(chat_id, text_confirm, reply_markup=markup_confirm, parse_mode="Markdown")
+
+def register_user_if_new(user_id, first_name, username, referrer_id=None):
+    try:
+        u = get_user(user_id)
+        safe_username = username if username else "لا يوجد"
+        safe_name = str(first_name) if first_name else "بدون اسم"
+
+        if not u:
+            notify_admin_new_user(user_id, safe_name, safe_username)
+
+            initial_points = 0.0
+            clean_referrer = None
+            if referrer_id and str(referrer_id).isdigit():
+                clean_referrer = int(referrer_id)
+                if clean_referrer != user_id:
+                    initial_points = 0.1
+
+            user_data = {
+                "user_id": user_id,
+                "first_name": safe_name,
+                "username": safe_username,
+                "points": initial_points,
+                "total_recharged": 0.0,
+                "total_spent": 0.0,
+                "is_banned": 0,
+                "is_reseller": 0,
+                "last_order_ts": int(time.time())
+            }
+
+            if clean_referrer:
+                user_data["referrer"] = str(clean_referrer)
+
+            supabase.table("users").insert(user_data).execute()
+
+            if initial_points > 0:
+                try:
+                    bot.send_message(user_id, "🎉 **أهلاً بك! حصلت على (0.1 نقطة) هدية ترحيبية لدخولك عبر رابط دعوة!**", parse_mode="Markdown")
+                except Exception:
+                    pass
+
+            if clean_referrer:
+                ref_user = get_user(clean_referrer)
+                if ref_user:
+                    reward = 0.2
+                    update_points(clean_referrer, reward)
+                    try:
+                        bot.send_message(
+                            clean_referrer, 
+                            f"🎉 **مبروك! انضم شخص جديد عبر رابط الدعوة الخاص بك.**\n💰 تم إضافة `{reward}` نقطة إلى حسابك بنجاح!", 
+                            parse_mode="Markdown"
+                        )
+                    except Exception:
+                        pass
+            return True
+        else:
+            try:
+                supabase.table("users").update({
+                    "first_name": safe_name,
+                    "username": safe_username
+                }).eq("user_id", user_id).execute()
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"Register user exception: {e}")
+    return False
+
+def check_sub(user_id):
+    for ch in CHANNELS:
+        try:
+            member = bot.get_chat_member(ch, user_id)
+            if member.status not in ['member', 'administrator', 'creator']:
+                return False
+        except Exception:
+            continue
+    return True
+
+def send_proof_to_channel(user_id, order_id, service_name, quantity=1, api_id="خدمة مباشرة"):
+    try:
+        uid_str = str(user_id)
+        hidden_id = uid_str[:3] + "***" + uid_str[-3:] if len(uid_str) > 6 else uid_str
+        
+        api_info = ""
+        if str(api_id) != "خدمة مباشرة" and not str(api_id).startswith("بيانات") and not str(api_id).startswith("Player ID"):
+            api_info = f"🔖 **رقم الـ API:** `{api_id}`\n"
+            
+        qty_info = f"🔢 **الكمية:** {quantity}\n" if quantity > 1 else ""
+
+        proof_text = (
+            f"👑 **عملية شراء جديدة بنجاح!**\n"
+            f"━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🆔 **رقم الطلب:** `{order_id}`\n"
+            f"👤 **الزبون:** `{hidden_id}`\n"
+            f"📦 **الخدمة / المنتج:** {service_name}\n"
+            f"{qty_info}"
+            f"⚡ **الحالة:** تم الاستلام والتنفيذ بنجاح ✅\n\n"
+            f"📢 **قناة التعاملات والإثباتات:** {PROOFS_CHANNEL}"
+        )
+        
+        bot_username = bot.get_me().username
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("🤖 تجربة البوت وطلب خدماتك", url=f"https://t.me/{bot_username}", style=get_item_style('bot_test')))
+
+        bot.send_message(PROOFS_CHANNEL, proof_text, parse_mode="Markdown", reply_markup=markup)
+    except Exception as e:
+        print(f"Error sending proof: {e}")
+
+def notify_admin_new_order(user_id, username, order_id, service_name, price, link="خدمة مباشرة"):
+    try:
+        link_str = f"\n🔗 **الرابط / التفاصيل:** `{link}`" if link != "خدمة مباشرة" else ""
+        text = (
+            f"🚨 **طلب جديد عبر البوت!**\n\n"
+            f"🆔 **رقم الطلب:** `{order_id}`\n"
+            f"👤 **الزبون:** {user_id} (@{username})\n"
+            f"📦 **الخدمة:** {service_name}\n"
+            f"💰 **المبلغ المقتطع:** {price} نقطة"
+            f"{link_str}"
+        )
+        bot.send_message(ADMIN_ID, text, parse_mode="Markdown")
+    except Exception as e:
+        print(f"Admin notify error: {e}")
+
+def referral_menu(chat_id, message_id):
+    bot_username = bot.get_me().username
+    referral_link = f"https://t.me/{bot_username}?start={chat_id}"
+    points = get_points(chat_id)
+    
+    try:
+        res = supabase.table("users").select("user_id", count="exact", head=True).eq("referrer", str(chat_id)).execute()
+        invites = res.count if res.count is not None else 0
+    except Exception:
+        invites = 0
+
+    promo_text = (
+        "ماركت المهاجم للخدمات الاكترونية، 🔥\n"
+        "عالم اخر من مختلف الخدمات: \n\n"
+        "1-رشق انستغرام جميع الفئات( متابعين، لايكات...)\n"
+        "2-رشق تلجرام جميع الفئات(اعضاء، ستارت بوتات، اعضاء مميزون للبحث)\n"
+        "3-شحن جميع الالعاب (كلاش، ببجي، لودو، فري فاير)\n"
+        "4-بطاقات ايتونز\n"
+        "5-شرائح esim انترنت بلا حدود\n\n"
+        "*كل هذه الخدمات وبأسعار تنافسية\n"
+        "شتنتظر جرب خدماتنا وشكرنا لاحقاً 😉🔥\n\n"
+        f"🔗 رابط الدخول واستلام جائزة الهدية:\n{referral_link}"
+    )
+
+    share_url = f"https://t.me/share/url?url={referral_link}&text={quote(promo_text)}"
+
+    text = (
+        f"👥 **نظام دعوة الأصدقاء المزدوج**\n\n"
+        f"📊 **إحصائياتك:**\n"
+        f"• عدد الأشخاص الذين دعوتهم: `{invites}` شخص\n"
+        f"• رصيدك الحالي: `{points}` نقطة\n\n"
+        f"🎁 **المكافأة المزدوجة:**\n"
+        f"• تحصل أنت على **(0.2 نقطة)** عن كل شخص يدخل برابطك.\n"
+        f"• يحصل صديقك الجديد على **(0.1 نقطة)** هدية ترحيبية فورية!\n\n"
+        f"🔗 رابط الدعوة الخاص بك:\n"
+        f"`{referral_link}`"
+    )
+    
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        types.InlineKeyboardButton("📲 مشاركة الرابط فورياً", url=share_url, style=get_item_style('share_url')),
+        types.InlineKeyboardButton("🔙 العودة للقائمة", callback_data='start', style=get_item_style('start'))
+    )
+    bot.edit_message_text(text, chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+
+def auto_check_orders_and_notifications():
+    while True:
+        try:
+            time.sleep(300)
+            res = supabase.table("user_orders").select("*").eq("status", "قيد التنفيذ").neq("api_order_id", "0").execute()
+            pending_orders = res.data if res.data else []
+
+            for order in pending_orders:
+                try:
+                    res_status = get_status(order['api_order_id'])
+                    if res_status and isinstance(res_status, dict) and 'status' in res_status:
+                        new_status = res_status['status']
+                        status_ar = "قيد التنفيذ"
+                        
+                        if new_status in ['Completed', 'المكتملة']:
+                            status_ar = "مكتمل ✅"
+                        elif new_status in ['Canceled', 'المبلغ المسترد', 'Cancelled']:
+                            status_ar = "ملغي وتم التعويض ❌"
+                            refund_amt = float(order.get('price', 0.0))
+                            update_points(order['user_id'], refund_amt)
+                            bot.send_message(
+                                order['user_id'],
+                                f"⚠️ **إشعار تعويض:**\nتم إلغاء طلبك رقم <code>{order['order_id']}</code> للخدمة ({order['service']}) من قبل المصدر.\n✅ **تم إعادة مبلغ ({refund_amt}) نقطة لرصيدك تلقائياً!**",
+                                parse_mode="HTML"
+                            )
+
+                        if status_ar != "قيد التنفيذ":
+                            supabase.table("user_orders").update({"status": status_ar}).eq("order_id", order['order_id']).execute()
+                except Exception as e:
+                    print(f"Error checking order {order['order_id']}: {e}")
+        except Exception as e:
+            print(f"Auto thread error: {e}")
+
+threading.Thread(target=auto_check_orders_and_notifications, daemon=True).start()
+
+def main_menu(chat_id, message_id=None):
+    if is_banned(chat_id):
+        bot.send_message(chat_id, "❌ أنت محظور من استخدام البوت.")
+        return
+
+    if is_maintenance() and chat_id != ADMIN_ID:
+        bot.send_message(chat_id, "🛠️ **البوت قيد الصيانة والتحديثات حالياً.**\nسنكون معكم قريباً بحلّة جديدة! 🌟", parse_mode="Markdown")
+        return
+
+    points = get_points(chat_id)
+    level_info = get_user_level(chat_id)
+    user_title = level_info['title']
+    discount_pct = int(level_info['discount'] * 100)
+    
+    status_text = f"{user_title} (خصم {discount_pct}%)" if discount_pct > 0 else user_title
+
+    cart_count = len(user_carts.get(chat_id, []))
+    cart_btn_text = f"🛒 سلة الشراء ({cart_count})" if cart_count > 0 else "🛒 سلة الشراء"
+
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    
+    # زر "خدماتنا" الرئيسي الذي يضم (انستغرام، تلجرام، آيتونز، شرائح eSIM، وشحن الألعاب) باللون الأخضر
+    if not is_item_in_maintenance('our_services') or chat_id == ADMIN_ID:
+        markup.add(types.InlineKeyboardButton("🛍️ خدماتنا", callback_data="our_services", style=get_item_style('our_services')))
+
+    markup.add(
+        types.InlineKeyboardButton("🔥 الأكثر طلباً", callback_data="top_services", style=get_item_style("top_services")),
+        types.InlineKeyboardButton(cart_btn_text, callback_data="view_my_cart", style=get_item_style("view_my_cart"))
+    )
+    markup.add(
+        types.InlineKeyboardButton("🎯 المسابقات والسحوبات", callback_data="active_giveaways", style=get_item_style("active_giveaways")),
+        types.InlineKeyboardButton("🔄 تحويل نقاط", callback_data="transfer_points", style=get_item_style("transfer_points"))
+    )
+    markup.add(
+        types.InlineKeyboardButton("🎖️ نظام الرتب والوكلاء", callback_data="ranks_info", style=get_item_style("ranks_info")),
+        types.InlineKeyboardButton("👥 دعوة الأصدقاء", callback_data="referral_menu", style=get_item_style("referral_menu"))
+    )
+    markup.add(
+        types.InlineKeyboardButton("🎁 مكافأة يومية", callback_data="daily_reward", style=get_item_style("daily_reward")),
+        types.InlineKeyboardButton("📦 طلباتي والتتبع الذكي", callback_data="my_orders", style=get_item_style("my_orders"))
+    )
+    # الأزرار باللون الأحمر حصراً حسب طلبك
+    markup.add(
+        types.InlineKeyboardButton("🎟️ إدخال كود شحن / هدية", callback_data="enter_voucher_code", style=get_item_style("enter_voucher_code"))
+    )
+    markup.add(
+        types.InlineKeyboardButton("💳 شحن رصيد آسيا سيل (مباشر)", callback_data="asiacell_recharge_menu", style=get_item_style("asiacell_recharge_menu")),
+        types.InlineKeyboardButton("💰 وكلاء شحن", url=SUPPORT_LINK, style=get_item_style("agents_btn"))
+    )
+
+    if not is_item_in_maintenance('support_btn') or chat_id == ADMIN_ID:
+        markup.add(
+            types.InlineKeyboardButton("👨‍💻 الدعم الفني", url=SUPPORT_LINK, style=get_item_style("support_btn"))
+        )
+    
+    if chat_id == ADMIN_ID:
+        markup.add(types.InlineKeyboardButton("⚙️ لوحة الإدارة", callback_data="admin_panel", style=get_item_style("admin_panel")))
+
+    text = (
+        f"نورت بوت المهاجم اولوياتنا رضا زبون 🌟\n\n"
+        f"💰 رصيدك: <b>{points}</b> نقطة\n"
+        f"🎖️ رتبتك الخدمات: <b>{status_text}</b>\n\n"
+        f"اختر القسم أو الخدمة المطلوبة:"
+    )
+    
+    if message_id:
+        try:
+            bot.edit_message_text(text, chat_id, message_id, reply_markup=markup, parse_mode="HTML")
+        except Exception:
+            bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML")
+    else:
+        bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML")
+
+
+def update_menu_safely(bot_inst, chat_id, message_id, menu_key, markup_kb):
+    text_to_show = get_menu_description(menu_key, "")
+    if not text_to_show:
+        text_to_show = "📌 **اختر الخدمة أو الفئة المطلوبة:**"
+    try:
+        bot_inst.edit_message_text(text_to_show, chat_id, message_id, reply_markup=markup_kb, parse_mode="Markdown")
+    except Exception:
+        try:
+            bot_inst.edit_message_text(text_to_show, chat_id, message_id, reply_markup=markup_kb)
+        except Exception as e:
+            print(f"Safe update menu error: {e}")
+
+# ==========================================
+# دالة معالجة الأزرار الموحدة
+# ==========================================
+@bot.callback_query_handler(func=lambda call: True)
+def query(call):
+    try:
+        chat_id = call.message.chat.id
+        message_id = call.message.message_id
+        data = call.data
+
+        try:
+            bot.answer_callback_query(call.id)
+        except Exception:
+            pass
+
+        # 🔹 فحص الاشتراك الإجباري المستمر مع كل ضغطة زر (باستثناء المالك)
+        if chat_id != ADMIN_ID and not check_sub(chat_id):
+            try:
+                bot.answer_callback_query(call.id, "❌ يجب عليك الاشتراك في القنوات أولاً!", show_alert=True)
+            except Exception:
+                pass
+            
+            markup = types.InlineKeyboardMarkup()
+            for i in range(len(CHANNELS)):
+                markup.add(types.InlineKeyboardButton(f"اشترك في القناة {i+1} 📢", url=CHANNEL_LINKS[i], style=get_item_style(CHANNEL_LINKS[i])))
+            markup.add(types.InlineKeyboardButton("تحققت من الاشتراك ✅", callback_data='start', style=get_item_style('start')))
+            
+            try:
+                bot.edit_message_text(
+                    "⚠️ **عذراً، يجب عليك الاشتراك في القنوات الإجبارية أولاً للمتابعة والاستخدام:**",
+                    chat_id, message_id, reply_markup=markup, parse_mode="Markdown"
+                )
+            except Exception:
+                bot.send_message(chat_id, "⚠️ **عذراً، يجب عليك الاشتراك في القنوات أولاً للمتابعة:**", reply_markup=markup, parse_mode="Markdown")
+            return
+
+        if chat_id == ADMIN_ID:
+            if data.startswith('admin_demote_'):
+                target_uid = int(data.replace('admin_demote_', ''))
+                demote_user_from_reseller(ADMIN_ID, target_uid)
+                bot.answer_callback_query(call.id, "✅ تم إلغاء رتبة الوكيل بنجاح!", show_alert=True)
+                try:
+                    bot.edit_message_text(call.message.text + "\n\n❌ **[تم إلغاء رتبة الوكيل]**", chat_id, message_id)
+                except Exception:
+                    pass
+                return
+
+
+            elif data.startswith('admin_promote_single_'):
+                target_uid = int(data.replace('admin_promote_single_', ''))
+                promote_user_to_reseller(ADMIN_ID, target_uid)
+                bot.answer_callback_query(call.id, "✅ تم ترقية المستخدم إلى وكيل معتمد بنجاح!", show_alert=True)
+                try:
+                    bot.edit_message_text(call.message.text + "\n\n✅ **[تمت الترقية إلى وكيل معتمد]**", chat_id, message_id)
+                except Exception:
+                    pass
+                return
+
+            elif data in ['admin_panel']:
+                admin_panel_shortcut(chat_id, message_id)
+                return
+
+            elif data == 'adm_select_item_to_recolor':
+                markup = types.InlineKeyboardMarkup(row_width=1)
+                markup.add(
+                    types.InlineKeyboardButton("📁 تلوين الأقسام الرئيسية", callback_data='recolor_type_cats', style=get_item_style('recolor_type_cats')),
+                    types.InlineKeyboardButton("📦 تلوين الخدمات القديمة", callback_data='recolor_type_srvs', style=get_item_style('recolor_type_srvs')),
+                    types.InlineKeyboardButton("🔙 رجوع لوحة الإدارة", callback_data='admin_panel', style=get_item_style('admin_panel'))
+                )
+                bot.edit_message_text("🎨 **اختر ما تريد تعديل لونه:**", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+                return
+
+            elif data == 'recolor_type_cats':
+                markup = types.InlineKeyboardMarkup(row_width=1)
+                for cat_k, cat_v in CATEGORIES.items():
+                    markup.add(types.InlineKeyboardButton(f"📁 {cat_v}", callback_data=f"pickcol_cat_{cat_k}", style=get_item_style(cat_k)))
+                markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='adm_select_item_to_recolor', style=get_item_style('adm_select_item_to_recolor')))
+                bot.edit_message_text("📁 **اختر القسم الرئيسي لتغيير لونه:**", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+                return
+
+            elif data == 'recolor_type_srvs':
+                markup = types.InlineKeyboardMarkup(row_width=1)
+                for s_key, s_data in list(SERVICES.items())[:35]:
+                    s_name = s_data.get('name', 'خدمة')
+                    markup.add(types.InlineKeyboardButton(f"📦 {s_name[:30]}", callback_data=f"pickcol_srv_{s_key}", style=get_item_style(s_key)))
+                markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='adm_select_item_to_recolor', style=get_item_style('adm_select_item_to_recolor')))
+                bot.edit_message_text("📦 **اختر الخدمة لتغيير لونها:**", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+                return
+
+            elif data.startswith('pickcol_'):
+                target_key = data.replace('pickcol_', '')
+                markup = types.InlineKeyboardMarkup(row_width=2)
+                markup.add(
+                    types.InlineKeyboardButton("🟢 أخضر (Success)", callback_data=f"savecol_{target_key}_success", style=get_item_style('success')),
+                    types.InlineKeyboardButton("🔵 أزرق (Primary)", callback_data=f"savecol_{target_key}_primary", style=get_item_style('primary')),
+                    types.InlineKeyboardButton("🔴 أحمر (Danger)", callback_data=f"savecol_{target_key}_danger", style=get_item_style('danger')),
+                    types.InlineKeyboardButton("⚪ افتراضي (عادي)", callback_data=f"savecol_{target_key}_default", style=get_item_style('default')),
+                    types.InlineKeyboardButton("🔙 رجوع", callback_data='adm_select_item_to_recolor', style=get_item_style('adm_select_item_to_recolor'))
+                )
+                bot.edit_message_text(f"🎨 **اختر اللون الجديد للهدف المختار:**", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+                return
+
+            elif data.startswith('savecol_'):
+                parts = data.replace('savecol_', '', 1).rsplit('_', 1)
+                if len(parts) == 2:
+                    target_key = parts[0]
+                    new_color = parts[1]
+                    if new_color == 'default':
+                        new_color = None
+
+                    if target_key.startswith('cat_'):
+                        try:
+                            supabase.table("settings").upsert({
+                                "key": f"style_cat_{target_key}",
+                                "val_text": new_color or ""
+                            }, on_conflict="key").execute()
+                        except Exception as e:
+                            print(f"Error updating category color: {e}")
+                    else:
+                        if target_key in SERVICES:
+                            SERVICES[target_key]['style'] = new_color
+                            if target_key.startswith('custom_srv_'):
+                                try:
+                                    custom_only = {k: v for k, v in SERVICES.items() if k.startswith('custom_srv_')}
+                                    supabase.table("settings").upsert({
+                                        "key": "custom_services_list",
+                                        "val_text": json.dumps(custom_only, ensure_ascii=False)
+                                    }, on_conflict="key").execute()
+                                except Exception as e:
+                                    print(f"Error updating custom service color in DB: {e}")
+                            try:
+                                supabase.table("settings").upsert({
+                                    "key": f"style_srv_{target_key}",
+                                    "val_text": new_color or ""
+                                }, on_conflict="key").execute()
+                            except Exception as e:
+                                print(f"Error saving fixed service color: {e}")
+
+                    bot.answer_callback_query(call.id, "✅ تم تغيير وتحديث اللون بنجاح!", show_alert=True)
+                    admin_panel_shortcut(chat_id, call.message.message_id)
+                return
+
+            elif data == 'admin_asiacell_panel':
+                markup = types.InlineKeyboardMarkup()
+                markup.add(types.InlineKeyboardButton("📱 تسجيل/تحديث رقم المالك", callback_data="admin_set_asiacell_number", style=get_item_style('admin_set_asiacell_number')))
+                markup.add(types.InlineKeyboardButton("🔄 عرض طلبات الشحن المعلقة", callback_data="admin_view_pending_transfers", style=get_item_style('admin_view_pending_transfers')))
+                markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel", style=get_item_style('admin_panel')))
+                bot.edit_message_text("🛠️ **لوحة تحكم شحن آسيا سيل:**", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+                return
+
+            elif data == 'admin_set_asiacell_number':
+                bot.send_message(chat_id, "📱 أدخل رقم هاتف آسيا سيل الخاص بالمالك:")
+                bot.register_next_step_handler(call.message, admin_process_asiacell_phone)
+                return
+
+            elif data == 'admin_view_pending_transfers':
+                admin_view_pending_transfers_func(chat_id)
+                return
+
+            elif data.startswith('admin_approve_transfer_'):
+                target_user_id = int(data.split("_")[-1])
+                admin_data_transfer_approval(chat_id, target_user_id)
+                return
+
+            elif data == 'skip_srv_desc':
+                if chat_id in temp_add_service:
+                    temp_add_service[chat_id]['msg'] = "أرسل الرابط المطلوب:"
+                ask_for_tiers_input(chat_id)
+                return
+
+            elif data == 'adm_manage_services':
+                markup = types.InlineKeyboardMarkup(row_width=1)
+                markup.add(
+                    types.InlineKeyboardButton("📁 إضافة قسم رئيسي جديد", callback_data='adm_add_new_category', style=get_item_style('adm_add_new_category')),
+                    types.InlineKeyboardButton("➕ إضافة قسم فرعي جديد", callback_data='adm_add_sub_category', style=get_item_style('adm_add_sub_category')),
+                    types.InlineKeyboardButton("❌ حذف قسم فرعي", callback_data='adm_delete_subcat_list', style=get_item_style('adm_delete_subcat_list')),
+                    types.InlineKeyboardButton("➕ إضافة خدمة جديدة", callback_data='adm_add_new_srv_cat', style=get_item_style('adm_add_new_srv_cat')),
+                    types.InlineKeyboardButton("🔍 فحص الآديات المحذوفة من المزود", callback_data='adm_check_broken_services', style=get_item_style('adm_check_broken_services')),
+                    types.InlineKeyboardButton("❌ حذف خدمة أو قسم", callback_data='adm_delete_srv_list', style=get_item_style('adm_delete_srv_list')),
+                    types.InlineKeyboardButton("📝 تعديل نصوص ووصف الأقسام", callback_data='adm_edit_descriptions', style=get_item_style('adm_edit_descriptions')),
+                    types.InlineKeyboardButton("🔙 رجوع للوحة الإدارة", callback_data='admin_panel', style=get_item_style('admin_panel'))
+                )
+                bot.edit_message_text("📦 **قسم إدارة الأقسام والخدمات بالبوت:**", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+                return
+
+            elif data == 'adm_add_sub_category':
+                markup = types.InlineKeyboardMarkup(row_width=1)
+                all_cats = dict(CATEGORIES)
+                for cat_k, cat_v in all_cats.items():
+                    markup.add(types.InlineKeyboardButton(cat_v, callback_data=f"addsub_cat_{cat_k}", style=get_item_style(cat_k)))
+                markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
+                bot.edit_message_text("📂 **اختر القسم الرئيسي الذي تريد إضافة قسم فرعي له:**", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+                return
+
+            elif data.startswith('addsub_cat_'):
+                cat_key = data.replace('addsub_cat_', '')
+                temp_add_service[chat_id] = {'category': cat_key}
+                text_req = "📝 **أدخل اسم القسم الفرعي الجديد (مثال: `متابعين عرب`):**"
+                markup_back = types.InlineKeyboardMarkup()
+                markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
+                bot.edit_message_text(text_req, chat_id, message_id, reply_markup=markup_back, parse_mode="Markdown")
+                bot.register_next_step_handler(call.message, step_subcat_name)
+                return
+
+            elif data == 'adm_delete_subcat_list':
+                if not SUB_CATEGORIES:
+                    bot.answer_callback_query(call.id, "❌ لا توجد أقسام فرعية مضافة حالياً!", show_alert=True)
+                    return
+                markup = types.InlineKeyboardMarkup(row_width=1)
+                for cat_key, subs in SUB_CATEGORIES.items():
+                    cat_name = CATEGORIES.get(cat_key, cat_key)
+                    for sub in subs:
+                        btn_text = f"🗑️ {cat_name} ⬅️ {sub['name']}"
+                        markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"delsub_{cat_key}_{sub['callback']}", style=get_item_style(sub['callback'])))
+                markup.add(types.InlineKeyboardButton("🔙 رجوع لإدارة الأقسام", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
+                bot.edit_message_text("❌ **اختر القسم الفرعي الذي تريد حذفه نهائياً:**", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+                return
+
+            elif data.startswith('delsub_'):
+                try:
+                    bot.answer_callback_query(call.id, "⏳ جاري حذف القسم الفرعي...", show_alert=False)
+                except Exception:
+                    pass
+                clean_data = data.replace('delsub_', '', 1)
+                if '_sub_' in clean_data:
+                    cat_key, sub_id = clean_data.rsplit('_sub_', 1)
+                    sub_callback = f"sub_{sub_id}"
+                else:
+                    parts = clean_data.split('_', 1)
+                    cat_key = parts[0]
+                    sub_callback = parts[1] if len(parts) > 1 else ""
+
+                if cat_key in SUB_CATEGORIES:
+                    SUB_CATEGORIES[cat_key] = [sub for sub in SUB_CATEGORIES[cat_key] if sub['callback'] != sub_callback]
+                    if not SUB_CATEGORIES[cat_key]:
+                        del SUB_CATEGORIES[cat_key]
+                    try:
+                        supabase.table("settings").upsert({
+                            "key": "custom_sub_categories",
+                            "val_text": json.dumps(SUB_CATEGORIES, ensure_ascii=False)
+                        }, on_conflict="key").execute()
+                    except Exception as e:
+                        print(f"Error updating sub categories after delete: {e}")
+                    try:
+                        bot.answer_callback_query(call.id, "✅ تم حذف القسم الفرعي بنجاح!", show_alert=True)
+                    except Exception:
+                        pass
+                    try:
+                        bot.delete_message(chat_id, message_id)
+                    except Exception:
+                        pass
+                    try:
+                        admin_panel_shortcut(chat_id)
+                    except Exception:
+                        main_menu(chat_id)
+                return
+
+            elif data == 'adm_check_broken_services':
+                bot.answer_callback_query(call.id, "⏳ جاري فحص جميع آديات الخدمات مع المزود...", show_alert=False)
+                success, result = check_broken_services_logic()
+                if not success:
+                    bot.send_message(chat_id, result)
+                    return
+                broken_list = result
+                if not broken_list:
+                    bot.send_message(chat_id, "🟢 **ممتاز! جميع آديات الخدمات المربوطة بالبوت موجودة وشغالة لدى المزود ولم يُحذف أي منها.**", parse_mode="Markdown")
+                    return
+                report_text = f"🚨 **تم رصد خدمات محذوفة أو غير متطابقة لدى المزود! ({len(broken_list)} خدمات):**\n━━━━━━━━━━━━━━━━━━━\n\n"
+                markup_del = types.InlineKeyboardMarkup(row_width=1)
+                for item in broken_list:
+                    report_text += f"❌ **الخدمة:** {item['name']}\n🆔 **الـ API ID:** `{item['service_id']}`\n\n"
+                    markup_del.add(types.InlineKeyboardButton(f"🗑️ حذف الخدمة: {item['name'][:25]}", callback_data=f"delsrv_{item['key']}", style=get_item_style(item['key'])))
+                markup_del.add(types.InlineKeyboardButton("🔙 رجوع لإدارة الخدمات", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
+                bot.send_message(chat_id, report_text, reply_markup=markup_del, parse_mode="Markdown")
+                return
+
+            elif data == 'adm_edit_descriptions':
+                markup = types.InlineKeyboardMarkup(row_width=1)
+                for cat_k, cat_name in CATEGORIES.items():
+                    markup.add(types.InlineKeyboardButton(f"📁 {cat_name}", callback_data=f"editdesc_cat_{cat_k}", style=get_item_style(cat_k)))
+                markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
+                bot.edit_message_text("📝 **اختر القسم لعرض خدماته وتعديل وصف خدمة محددة:**", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+                return
+
+            elif data.startswith('editdesc_cat_'):
+                cat_key = data.replace('editdesc_cat_', '')
+                cat_name = CATEGORIES.get(cat_key, "القسم")
+                markup = types.InlineKeyboardMarkup(row_width=1)
+                cat_services = {k: v for k, v in SERVICES.items() if v.get('category') == cat_key}
+                if not cat_services:
+                    bot.answer_callback_query(call.id, "❌ لا توجد خدمات مضافة في هذا القسم حالياً!", show_alert=True)
+                    return
+                for s_key, s_data in cat_services.items():
+                    s_name = s_data.get('name', 'خدمة')
+                    markup.add(types.InlineKeyboardButton(f"📦 {s_name}", callback_data=f"editsrvdesc_{s_key}", style=get_item_style(s_key)))
+                markup.add(types.InlineKeyboardButton("🔙 رجوع للأقسام", callback_data='adm_edit_descriptions', style=get_item_style('adm_edit_descriptions')))
+                bot.edit_message_text(f"📁 **{cat_name}**\nاختر الخدمة التي تريد تعديل وصفها:", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+                return
+
+            elif data.startswith('editsrvdesc_'):
+                service_key = data.replace('editsrvdesc_', '')
+                s_info = SERVICES.get(service_key)
+                if not s_info:
+                    bot.answer_callback_query(call.id, "❌ الخدمة غير موجودة!", show_alert=True)
+                    return
+                admin_states[chat_id] = {'action': 'edit_service_desc', 'service_key': service_key}
+                current_msg = s_info.get('msg', 'لا يوجد وصف حالياً (سيظهر النص الافتراضي).')
+                text_req = (
+                    f"📝 **تعديل وصف الخدمة:** `{s_info['name']}`\n"
+                    f"━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"📌 الوصف الحالي:\n`{current_msg}`\n\n"
+                    f"✍️ **أرسل الآن الوصف أو الرسالة الجديدة التي ستظهر للمستخدم عند طلب هذه الخدمة:**"
+                )
+                markup_back = types.InlineKeyboardMarkup()
+                markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_edit_descriptions', style=get_item_style('adm_edit_descriptions')))
+                bot.edit_message_text(text_req, chat_id, message_id, reply_markup=markup_back, parse_mode="Markdown")
+                bot.register_next_step_handler(call.message, process_admin_edit_service_desc)
+                return
+
+            elif data == 'adm_add_new_category':
+                text_req = "📁 **أدخل مفتاح القسم باللغة الإنجليزية (مثال: `cat_tiktok`):**"
+                markup_back = types.InlineKeyboardMarkup()
+                markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
+                bot.edit_message_text(text_req, chat_id, message_id, reply_markup=markup_back, parse_mode="Markdown")
+                bot.register_next_step_handler(call.message, step_add_category_key)
+                return
+
+            elif data == 'adm_add_new_srv_cat':
+                markup = types.InlineKeyboardMarkup(row_width=1)
+                for cat_k, cat_v in CATEGORIES.items():
+                    markup.add(types.InlineKeyboardButton(cat_v, callback_data=f"addsrv_cat_{cat_k}", style=get_item_style(cat_k)))
+                markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
+                bot.edit_message_text("📂 **اختر القسم الرئيسي الذي تريد إضافة الخدمة فيه:**", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+                return
+
+            elif data.startswith('addsrv_cat_'):
+                cat_key = data.replace('addsrv_cat_', '')
+                temp_add_service[chat_id] = {'category': cat_key}
+                subs = list(SUB_CATEGORIES.get(cat_key, []))
+                if cat_key == 'cat_insta':
+                    default_insta_subs = [
+                        {'name': '👤 قسم المتابعين', 'callback': 'fol'},
+                        {'name': '❤️ قسم اللايكات', 'callback': 'like'},
+                        {'name': '👁️ قسم المشاهدات', 'callback': 'view'},
+                        {'name': '✈️ قسم المشاركات', 'callback': 'share'}
+                    ]
+                    existing_callbacks = {s.get('callback') for s in subs}
+                    for d_sub in default_insta_subs:
+                        if d_sub['callback'] not in existing_callbacks:
+                            subs.append(d_sub)
+
+                if subs:
+                    markup = types.InlineKeyboardMarkup(row_width=1)
+                    for sub in subs:
+                        cb_val = sub.get('callback')
+                        if not cb_val.startswith('sub_') and not cb_val.startswith('subcat_'):
+                            cb_val = f"sub_{cb_val}"
+                        markup.add(types.InlineKeyboardButton(f"📁 {sub['name']}", callback_data=f"srv_sub_{sub.get('callback')}", style=get_item_style(cb_val)))
+                    
+                    markup.add(types.InlineKeyboardButton("⚙️ بدون قسم فرعي (القسم الرئيسي مباشرة)", callback_data="srv_sub_none", style=get_item_style('srv_sub_none')))
+                    markup.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
+                    bot.edit_message_text("📂 **هذا القسم يحتوي على أقسام فرعية، اختر القسم الفرعي الذي ستنتمي إليه الخدمة:**", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+                    return
+
+                text_req = "📝 **أدخل اسم الخدمة الجديدة التي ستظهر للمستخدمين:**"
+                markup_back = types.InlineKeyboardMarkup()
+                markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
+                bot.edit_message_text(text_req, chat_id, message_id, reply_markup=markup_back, parse_mode="Markdown")
+                bot.register_next_step_handler(call.message, step_srv_name)
+                return
+
+            elif data.startswith('srv_sub_'):
+                sub_choice = data.replace('srv_sub_', '')
+                if chat_id in temp_add_service:
+                    if sub_choice != 'none':
+                        temp_add_service[chat_id]['subcat'] = sub_choice
+                    else:
+                        temp_add_service[chat_id]['subcat'] = None
+
+                text_req = "📝 **أدخل اسم الخدمة الجديدة التي ستظهر للمستخدمين:**"
+                markup_back = types.InlineKeyboardMarkup()
+                markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
+                bot.edit_message_text(text_req, chat_id, message_id, reply_markup=markup_back, parse_mode="Markdown")
+                bot.register_next_step_handler(call.message, step_srv_name)
+                return
+
+            elif data == 'adm_delete_srv_list':
+                markup = types.InlineKeyboardMarkup(row_width=1)
+                for cat_k, cat_v in CATEGORIES.items():
+                    markup.add(types.InlineKeyboardButton(cat_v, callback_data=f"adm_del_cat_srvs_{cat_k}", style=get_item_style(cat_k)))
+                markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
+                bot.edit_message_text("📌 **اختر القسم لعرض خدماته وحذفها فوراً، أو لحذف القسم كله:**", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+                return
+
+            elif data.startswith('adm_del_cat_srvs_'):
+                cat_key = data.replace('adm_del_cat_srvs_', '')
+                cat_name = CATEGORIES.get(cat_key, "القسم")
+                markup = types.InlineKeyboardMarkup(row_width=1)
+                cat_services = {k: v for k, v in SERVICES.items() if v.get('category') == cat_key}
+                seen_names = set()
+                for s_key, s_data in cat_services.items():
+                    name = s_data['name']
+                    base_name = name
+                    for suffix in [' 1k', ' 2k', ' 3k', ' 4k', ' 5k', ' 10k', ' (ضمان 20 يوم)', ' ثابت', ' فلاش', ' دراجون']:
+                        if suffix in base_name:
+                            base_name = base_name.replace(suffix, '')
+                    base_name = base_name.strip()
+                    if base_name not in seen_names:
+                        seen_names.add(base_name)
+                        markup.add(types.InlineKeyboardButton(f"🗑️ {base_name}", callback_data=f"delgroup_{cat_key}_{s_key}", style=get_item_style(s_key)))
+                markup.add(types.InlineKeyboardButton(f"❌ حذف القسم بالكامل ({cat_name})", callback_data=f"delcat_{cat_key}", style=get_item_style(cat_key)))
+                markup.add(types.InlineKeyboardButton("🔙 رجوع للأقسام", callback_data='adm_delete_srv_list', style=get_item_style('adm_delete_srv_list')))
+                bot.edit_message_text(f"📁 **{cat_name}**\nاختر الخدمة الرئيسية لحذفها كـ مجموعة نهائياً:", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+                return
+
+            elif data == 'adm_menu_finance':
+                markup = types.InlineKeyboardMarkup(row_width=1)
+                markup.add(
+                    types.InlineKeyboardButton("💵 رصيد DarkFollow المالي", callback_data='adm_check_df_balance', style=get_item_style('adm_check_df_balance')),
+                    types.InlineKeyboardButton("🔄 مزامنة الأسعار فورياً (+0.5$ ربح)", callback_data='adm_force_sync_prices', style=get_item_style('adm_force_sync_prices')),
+                    types.InlineKeyboardButton("✏️ تعديل سعر خدمة محددة", callback_data='adm_edit_single_price', style=get_item_style('adm_edit_single_price')),
+                    types.InlineKeyboardButton("📈 رفع/خفض الأسعار بنسبة (%)", callback_data='adm_bulk_price_pct_menu', style=get_item_style('adm_bulk_price_pct_menu')),
+                    types.InlineKeyboardButton("🔙 رجوع للوحة الإدارة", callback_data='admin_panel', style=get_item_style('admin_panel'))
+                )
+                bot.edit_message_text("🏷️ **قسم التحكم بالأسعار والمالية:**", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+                return
+
+            elif data == 'adm_check_df_balance':
+                res_bal = get_api_balance()
+                if isinstance(res_bal, dict) and 'balance' in res_bal:
+                    bal_val = res_bal['balance']
+                    curr = res_bal.get('currency', 'USD')
+                    bot.answer_callback_query(call.id, f"رصيدك الحالي: {bal_val} {curr}", show_alert=True)
+                    bot.send_message(chat_id, f"💵 **رصيدك الحالي في موقع DarkFollow:**\n`{bal_val} {curr}`", parse_mode="Markdown")
+                else:
+                    bot.answer_callback_query(call.id, "تعذر جلب الرصيد من المزود حالياً.", show_alert=True)
+                return
+
+            elif data == 'adm_force_sync_prices':
+                bot.answer_callback_query(call.id, "⏳ جاري الاتصال بالمزود وجلب الأسعار...", show_alert=False)
+                success, result = sync_prices_from_api_logic()
+                if success:
+                    bot.send_message(chat_id, f"🔄 **تمت مزامنة الأسعار من موقع DarkFollow وتحديثها بنجاح!**\n📊 عدد الخدمات المحدثة: `{result}` خدمة.", parse_mode="Markdown")
+                else:
+                    bot.send_message(chat_id, f"❌ **فشلت عملية المزامنة مع المزود:**\n`{result}`", parse_mode="Markdown")
+                return
+
+            elif data == 'adm_edit_single_price':
+                markup = types.InlineKeyboardMarkup(row_width=2)
+                for key, val in SERVICES.items():
+                    markup.add(types.InlineKeyboardButton(f"{val['name']} ({val.get('price', 0)} ن)", callback_data=f"setprc_{key}", style=get_item_style(key)))
+                markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='adm_menu_finance', style=get_item_style('adm_menu_finance')))
+                bot.edit_message_text("✏️ **اختر الخدمة المراد تعديل سعرها:**", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+                return
+
+            elif data.startswith('setprc_'):
+                service_key = data.replace('setprc_', '')
+                service_info = SERVICES.get(service_key)
+                if service_info:
+                    text_req = f"✏️ **الخدمة:** {service_info['name']}\n💰 السعر الحالي: `{service_info.get('price', 0)}` نقطة\n\nأرسل **السعر الجديد** بالنقاط الآن:"
+                    markup_back = types.InlineKeyboardMarkup()
+                    markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_edit_single_price', style=get_item_style('adm_edit_single_price')))
+                    bot.edit_message_text(text_req, chat_id, message_id, reply_markup=markup_back, parse_mode="Markdown")
+                    bot.register_next_step_handler(call.message, process_update_single_price, service_key)
+                return
+
+            elif data == 'adm_bulk_price_pct_menu':
+                markup = types.InlineKeyboardMarkup(row_width=1)
+                markup.add(
+                    types.InlineKeyboardButton("📉 خفض السعر بنسبة (%)", callback_data='adm_bulk_decrease_pct', style=get_item_style('adm_bulk_decrease_pct')),
+                    types.InlineKeyboardButton("📈 زيادة السعر بنسبة (%)", callback_data='adm_bulk_increase_pct', style=get_item_style('adm_bulk_increase_pct')),
+                    types.InlineKeyboardButton("🔙 رجوع", callback_data='adm_menu_finance', style=get_item_style('adm_menu_finance'))
+                )
+                bot.edit_message_text("📈 **اختر نوع تعديل الأسعار الكلي:**", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+                return
+
+            elif data == 'adm_bulk_decrease_pct':
+                text_req = "📉 **خفض أسعار الخدمات:**\n\nأدخل نسبة الخفض (مثال: `10` لخفض الأسعار 10%):"
+                markup_back = types.InlineKeyboardMarkup()
+                markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_bulk_price_pct_menu', style=get_item_style('adm_bulk_price_pct_menu')))
+                bot.edit_message_text(text_req, chat_id, message_id, reply_markup=markup_back, parse_mode="Markdown")
+                bot.register_next_step_handler(call.message, process_update_bulk_price_decrease)
+                return
+
+            elif data == 'adm_bulk_increase_pct':
+                text_req = "📈 **زيادة أسعار الخدمات:**\n\nأدخل نسبة الزيادة (مثال: `15` لزيادة الأسعار 15%):"
+                markup_back = types.InlineKeyboardMarkup()
+                markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_bulk_price_pct_menu', style=get_item_style('adm_bulk_price_pct_menu')))
+                bot.edit_message_text(text_req, chat_id, message_id, reply_markup=markup_back, parse_mode="Markdown")
+                bot.register_next_step_handler(call.message, process_update_bulk_price_increase)
+                return
+
+            elif data == 'adm_menu_users':
+                markup = types.InlineKeyboardMarkup(row_width=1)
+                markup.add(
+                    types.InlineKeyboardButton("🔍 البحث عن مستخدم وتعديل رصيده", callback_data='adm_search', style=get_item_style('adm_search')),
+                    types.InlineKeyboardButton("🕶️ ترقية مستخدم إلى (وكيل معتمد)", callback_data='adm_promote_reseller_prompt', style=get_item_style('adm_promote_reseller_prompt')),
+                    types.InlineKeyboardButton("🚫 إدارة المحظورين (Unban)", callback_data='adm_list_banned', style=get_item_style('adm_list_banned')),
+                    types.InlineKeyboardButton("👥 إحصائية المشتركين الكلية", callback_data='adm_count', style=get_item_style('adm_count')),
+                    types.InlineKeyboardButton("🔙 رجوع للوحة الإدارة", callback_data='admin_panel', style=get_item_style('admin_panel'))
+                )
+                bot.edit_message_text("👥 **قسم إدارة وتتبع المستخدمين والوكلاء:**", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+                return
+
+            elif data == 'adm_search':
+                text_req = "🔍 **أرسل ID المستخدم أو اسم المستخدم (@username) للبحث عنه:**"
+                markup_back = types.InlineKeyboardMarkup()
+                markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_menu_users', style=get_item_style('adm_menu_users')))
+                bot.edit_message_text(text_req, chat_id, message_id, reply_markup=markup_back, parse_mode="Markdown")
+                bot.register_next_step_handler(call.message, process_admin_user_search)
+                return
+
+            elif data == 'adm_promote_reseller_prompt':
+                text_req = "🕶️ **أرسل ID المستخدم لترقيته إلى رتبة (وكيل معتمد):**"
+                markup_back = types.InlineKeyboardMarkup()
+                markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_menu_users', style=get_item_style('adm_menu_users')))
+                bot.edit_message_text(text_req, chat_id, message_id, reply_markup=markup_back, parse_mode="Markdown")
+                bot.register_next_step_handler(call.message, process_admin_promote_reseller)
+                return
+
+            elif data == 'adm_count':
+                try:
+                    res_u = supabase.table("users").select("user_id, last_order_ts, is_banned").execute()
+                    all_users = res_u.data if res_u.data else []
+                    total_u = len(all_users)
+                    banned_c = sum(1 for u in all_users if u.get('is_banned') == 1)
+                    active_c = 0
+                    inactive_c = 0
+                    now = time.time()
+                    for u in all_users:
+                        last_t = u.get('last_order_ts', 0)
+                        if now - last_t < 604800:
+                            active_c += 1
+                        else:
+                            inactive_c += 1
+                    res_ord = supabase.table("user_orders").select("order_id", count="exact", head=True).execute()
+                    total_o = res_ord.count if res_ord.count is not None else 0
+                    text = (
+                        f"👥 **الإحصائيات التفصيلية للمشتركين:**\n"
+                        f"━━━━━━━━━━━━━━━━━━━\n\n"
+                        f"• 👤 إجمالي المشتركين: `{total_u}` عضو\n"
+                        f"• 🟢 النشطاء (آخر أسبوع): `{active_c}` عضو\n"
+                        f"• 💤 الخاملين: `{inactive_c}` عضو\n"
+                        f"• 🚫 إجمالي المحظورين: `{banned_c}` عضو\n"
+                        f"• 📦 إجمالي الطلبات الكلية: `{total_o}` طلب"
+                    )
+                    bot.send_message(chat_id, text, parse_mode="Markdown")
+                except Exception as e:
+                    bot.send_message(chat_id, f"❌ حدث خطأ أثناء جلب الإحصائيات: {e}")
+                return
+
+            elif data == 'adm_list_banned':
+                res = supabase.table("users").select("user_id, username").eq("is_banned", 1).execute()
+                banned_users = res.data if res.data else []
+                if not banned_users:
+                    bot.send_message(chat_id, "🟢 لا يوجد مستخدمين محظورين حالياً.")
+                    return
+                markup = types.InlineKeyboardMarkup(row_width=1)
+                for bu in banned_users:
+                    markup.add(types.InlineKeyboardButton(f"🔓 فك الحظر عن: {bu['user_id']} (@{bu.get('username','لا يوجد')})", callback_data=f"unban_{bu['user_id']}", style=get_item_style(f"unban_{bu['user_id']}")))
+                markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='adm_menu_users', style=get_item_style('adm_menu_users')))
+                bot.edit_message_text("🚫 **قائمة المحظورين:**", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+                return
+
+            elif data.startswith('unban_'):
+                b_id = int(data.replace('unban_', ''))
+                supabase.table("users").update({"is_banned": 0}).eq("user_id", b_id).execute()
+                bot.send_message(chat_id, f"✅ **تم فك الحظر عن المستخدم (`{b_id}`) بنجاح!**", parse_mode="Markdown")
+                return
+
+            elif data.startswith('admin_add_pts_'):
+                target_uid = int(data.replace('admin_add_pts_', ''))
+                admin_states[chat_id] = {'action': 'add_pts', 'target': target_uid}
+                text_req = f"💰 **أدخل عدد النقاط المراد إضافتها للمستخدم (`{target_uid}`):**"
+                markup_back = types.InlineKeyboardMarkup()
+                markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_menu_users', style=get_item_style('adm_menu_users')))
+                bot.edit_message_text(text_req, chat_id, message_id, reply_markup=markup_back, parse_mode="Markdown")
+                bot.register_next_step_handler(call.message, process_admin_modify_points)
+                return
+
+            elif data.startswith('admin_msg_'):
+                target_uid = int(data.replace('admin_msg_', ''))
+                admin_states[chat_id] = {'action': 'send_msg', 'target': target_uid}
+                text_req = f"💬 **أرسل الرسالة للمستخدم (`{target_uid}`):**"
+                markup_back = types.InlineKeyboardMarkup()
+                markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_menu_users', style=get_item_style('adm_menu_users')))
+                bot.edit_message_text(text_req, chat_id, message_id, reply_markup=markup_back, parse_mode="Markdown")
+                bot.register_next_step_handler(call.message, process_admin_send_direct_msg)
+                return
+
+            elif data == 'adm_menu_promos':
+                markup = types.InlineKeyboardMarkup(row_width=1)
+                markup.add(
+                    types.InlineKeyboardButton("🎁 إنشاء كود شحن فردي", callback_data='adm_gen_card', style=get_item_style('adm_gen_card')),
+                    types.InlineKeyboardButton("🎟️ إنشاء كود هدية عامة بالقناة", callback_data='adm_gen_gift', style=get_item_style('adm_gen_gift')),
+                    types.InlineKeyboardButton("🎯 إنشاء مسابقة جديدة مع النشر", callback_data='adm_create_gw', style=get_item_style('adm_create_gw')),
+                    types.InlineKeyboardButton("🎲 سحب الفائزين بالمسابقة", callback_data='adm_draw_gw', style=get_item_style('adm_draw_gw')),
+                    types.InlineKeyboardButton("🔙 رجوع للوحة الإدارة", callback_data='admin_panel', style=get_item_style('admin_panel'))
+                )
+                bot.edit_message_text("🎟️ **قسم الهدايا، المسابقات والكروت الشحن:**", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+                return
+
+            elif data == 'adm_gen_card':
+                text_req = "أرسل قيمة النقاط لكود الشحن المراد إنشاؤه:"
+                markup_back = types.InlineKeyboardMarkup()
+                markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_menu_promos', style=get_item_style('adm_menu_promos')))
+                bot.edit_message_text(text_req, chat_id, message_id, reply_markup=markup_back, parse_mode="Markdown")
+                bot.register_next_step_handler(call.message, process_gen_card)
+                return
+
+            elif data == 'adm_gen_gift':
+                text_req = "🎟️ **أدخل الكود وقيمة النقاط وعدد الأشخاص يفصل بينها مسافة:**"
+                markup_back = types.InlineKeyboardMarkup()
+                markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_menu_promos', style=get_item_style('adm_menu_promos')))
+                bot.edit_message_text(text_req, chat_id, message_id, reply_markup=markup_back, parse_mode="Markdown")
+                bot.register_next_step_handler(call.message, process_gen_gift_code)
+                return
+
+            elif data == 'adm_create_gw':
+                text_req = "🏆 **أدخل عنوان المسابقة - نقاط الجائزة - عدد الفائزين:**"
+                markup_back = types.InlineKeyboardMarkup()
+                markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_menu_promos', style=get_item_style('adm_menu_promos')))
+                bot.edit_message_text(text_req, chat_id, message_id, reply_markup=markup_back, parse_mode="Markdown")
+                bot.register_next_step_handler(call.message, process_create_giveaway)
+                return
+
+            elif data == 'adm_draw_gw':
+                res = supabase.table("giveaways").select("*").eq("is_active", 1).execute()
+                gws = res.data if res.data else []
+                if not gws:
+                    bot.send_message(chat_id, "❌ لا توجد مسابقات سارية حالياً لتنفيذ السحب عليها.")
+                    return
+                markup = types.InlineKeyboardMarkup(row_width=1)
+                for g in gws:
+                    markup.add(types.InlineKeyboardButton(f"🎲 سحب فائزين: {g['title']}", callback_data=f"draw_winners_{g['id']}", style=get_item_style(f"draw_winners_{g['id']}")))
+                bot.edit_message_text("🎲 **اختر المسابقة المراد إجراء السحب العشوائي لها:**", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+                return
+
+            elif data.startswith('draw_winners_'):
+                gw_id = int(data.replace('draw_winners_', ''))
+                gw_res = supabase.table("giveaways").select("*").eq("id", gw_id).execute()
+                if not gw_res.data:
+                    return
+                gw = gw_res.data[0]
+                parts_res = supabase.table("giveaway_participants").select("user_id").eq("giveaway_id", gw_id).execute()
+                participants = [p['user_id'] for p in parts_res.data] if parts_res.data else []
+                if not participants:
+                    bot.send_message(chat_id, "❌ لا يوجد مشاركين بهذه المسابقة لإجراء السحب!")
+                    return
+                winner_count = min(len(participants), int(gw['winners_count']))
+                winners = random.sample(participants, winner_count)
+                supabase.table("giveaways").update({"is_active": 0}).eq("id", gw_id).execute()
+                winners_text = ""
+                for w_id in winners:
+                    update_points(w_id, float(gw['prize_points']))
+                    winners_text += f"• `{w_id}` (تم إضافة {gw['prize_points']} نقطة)\n"
+                    try:
+                        bot.send_message(w_id, f"🎉 **مبروك! لقد فزت بالمسابقة: {gw['title']}**", parse_mode="Markdown")
+                    except Exception:
+                        pass
+                bot.send_message(ADMIN_ID, f"🎉 **تم إجراء السحب العشوائي للمسابقة ({gw['title']}) بنجاح!**\n\n🏆 **الفائزون:**\n{winners_text}", parse_mode="Markdown")
+                return
+
+            elif data == 'adm_menu_system':
+                markup = types.InlineKeyboardMarkup(row_width=1)
+                markup.add(
+                    types.InlineKeyboardButton("📢 إذاعة مع التثبيت والخيارات", callback_data='adm_targeted_broadcast', style=get_item_style('adm_targeted_broadcast')),
+                    types.InlineKeyboardButton("📊 تحليل سلوك وأوقات الزبائن", callback_data='adm_behavior_analytics', style=get_item_style('adm_behavior_analytics')),
+                    types.InlineKeyboardButton("📈 تقرير الأرباح المتقدم والتوب", callback_data='adm_stats', style=get_item_style('adm_stats')),
+                    types.InlineKeyboardButton("🔙 رجوع للوحة الإدارة", callback_data='admin_panel', style=get_item_style('admin_panel'))
+                )
+                bot.edit_message_text("⚙️ **قسم إعدادات النظام والإذاعات:**", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+                return
+
+            elif data == 'adm_targeted_broadcast':
+                markup = types.InlineKeyboardMarkup(row_width=1)
+                markup.add(
+                    types.InlineKeyboardButton("📢 إذاعة لجميع الأعضاء (عادية)", callback_data='bc_type_all', style=get_item_style('bc_type_all')),
+                    types.InlineKeyboardButton("📌 إذاعة لجميع الأعضاء + تثبيت", callback_data='bc_type_pin', style=get_item_style('bc_type_pin')),
+                    types.InlineKeyboardButton("🌙 إذاعة للمستخدمين الخاملين فقط", callback_data='bc_type_inactive', style=get_item_style('bc_type_inactive')),
+                    types.InlineKeyboardButton("🔙 رجوع", callback_data='adm_menu_system', style=get_item_style('adm_menu_system'))
+                )
+                bot.edit_message_text("📢 **اختر نوع الإذاعة المطلوبة:**", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+                return
+
+            elif data.startswith('bc_type_'):
+                b_type = data.replace('bc_type_', '')
+                admin_states[chat_id] = {'action': 'broadcast', 'type': b_type}
+                text_req = "📢 **أرسل الآن الرسالة لإذاعتها:**"
+                markup_back = types.InlineKeyboardMarkup()
+                markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_targeted_broadcast', style=get_item_style('adm_targeted_broadcast')))
+                bot.edit_message_text(text_req, chat_id, message_id, reply_markup=markup_back, parse_mode="Markdown")
+                bot.register_next_step_handler(call.message, process_admin_broadcast_execution)
+                return
+
+            elif data == 'adm_behavior_analytics':
+                res_orders = supabase.table("user_orders").select("*").execute()
+                orders = res_orders.data if res_orders.data else []
+                total_orders = len(orders)
+                if total_orders == 0:
+                    bot.send_message(chat_id, "📊 **لا توجد بيانات كافية لتحليل سلوك الزبائن حالياً.**", parse_mode="Markdown")
+                    return
+                morning_cnt = sum(1 for o in orders if 6 <= time.localtime(o.get('created_at_ts', time.time())).tm_hour < 12)
+                evening_cnt = sum(1 for o in orders if 12 <= time.localtime(o.get('created_at_ts', time.time())).tm_hour < 18)
+                night_cnt = total_orders - (morning_cnt + evening_cnt)
+                text = (
+                    f"📊 **تقرير تحليل سلوك ودراسة الزبائن:**\n━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"🛍️ **إجمالي الطلبات الكلي:** `{total_orders}` طلب\n\n"
+                    f"• 🌅 الفترة الصباحية: `{morning_cnt}` طلب\n"
+                    f"• ☀️ الفترة المسائية: `{evening_cnt}` طلب\n"
+                    f"• 🌙 الفترة الليلية: `{night_cnt}` طلب"
+                )
+                bot.send_message(chat_id, text, parse_mode="Markdown")
+                return
+
+            elif data == 'adm_stats':
+                res_users = supabase.table("users").select("user_id, first_name, total_spent").order("total_spent", desc=True).limit(5).execute()
+                top_users = res_users.data if res_users.data else []
+                res_orders = supabase.table("user_orders").select("*").execute()
+                orders_list = res_orders.data if res_orders.data else []
+                orders_c = len(orders_list)
+                total_revenue = sum(float(o.get('price', 0)) for o in orders_list)
+                total_cost = 0.0
+                for o in orders_list:
+                    s_name = o.get('service')
+                    for k, v in SERVICES.items():
+                        if v['name'] == s_name:
+                            total_cost += v.get('cost', float(o.get('price', 0)) * 0.5)
+                            break
+                net_profit_points = round(total_revenue - total_cost, 2)
+                top_str = ""
+                for idx, tu in enumerate(top_users, 1):
+                    top_str += f"{idx}. {tu.get('first_name', 'مستخدم')} (أنفق: {tu.get('total_spent', 0)} ن)\n"
+                text = (
+                    f"📊 **تقرير الأرباح الإحصائي المتقدم:**\n\n"
+                    f"📦 **إجمالي الطلبات المنفذة:** {orders_c}\n"
+                    f"💰 **إجمالي المبيعات:** {round(total_revenue, 2)} نقطة\n"
+                    f"📈 **صافي الربح التقديري:** {net_profit_points} نقطة\n\n"
+                    f"🏆 **أعلى 5 مستخدمين إنفاقاً:**\n{top_str}"
+                )
+                bot.send_message(chat_id, text, parse_mode="Markdown")
+                return
+
+            elif data == 'adm_maint_control_menu':
+                m_status = "مفعل 🛠️" if is_maintenance() else "معطل 🟢"
+                markup = types.InlineKeyboardMarkup(row_width=1)
+                markup.add(
+                    types.InlineKeyboardButton(f"🛠️ تغيير صيانة البوت الكلي ({m_status})", callback_data='adm_toggle_maint', style=get_item_style('adm_toggle_maint')),
+                    types.InlineKeyboardButton("🔘 صيانة أزرار وقوائم البوت العامة", callback_data='adm_maint_buttons_menu', style=get_item_style('adm_maint_buttons_menu')),
+                    types.InlineKeyboardButton("📂 صيانة الأقسام والخدمات", callback_data='adm_maint_services_by_cat', style=get_item_style('adm_maint_services_by_cat')),
+                    types.InlineKeyboardButton("🔙 رجوع للوحة الإدارة", callback_data='admin_panel', style=get_item_style('admin_panel'))
+                )
+                bot.edit_message_text("🛠️ **إدارة صيانة الأزرار والأقسام الشاملة:**", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+                return
+
+            elif data == 'adm_toggle_maint':
+                toggle_maintenance()
+                bot.send_message(chat_id, f"✅ تم تبديل حالة صيانة البوت الكلي بنجاح.")
+                return
+
+            elif data == 'adm_maint_buttons_menu':
+                markup = types.InlineKeyboardMarkup(row_width=2)
+                buttons_list = [
+                    ('top_services', '🔥 الأكثر طلباً'),
+                    ('view_my_cart', '🛒 سلة الشراء'),
+                    ('active_giveaways', '🎯 المسابقات'),
+                    ('transfer_points', '🔄 تحويل نقاط'),
+                    ('ranks_info', '🎖️ نظام الرتب'),
+                    ('referral_menu', '👥 دعوة الأصدقاء'),
+                    ('daily_reward', '🎁 مكافأة يومية'),
+                    ('my_orders', '📦 طلباتي والتتبع'),
+                    ('asiacell_recharge_menu', '💳 شحن آسيا (مباشر)'),
+                    ('usdt_recharge_menu', '🪙 شحن USDT'),
+                    ('support_btn', '👨‍💻 الدعم الفني')
+                ]
+                for btn_key, btn_name in buttons_list:
+                    st = "🛠️ (صيانة)" if is_item_in_maintenance(btn_key) else "🟢 (شغال)"
+                    markup.add(types.InlineKeyboardButton(f"{btn_name} - {st}", callback_data=f"toggle_maint_{btn_key}", style=get_item_style(btn_key)))
+                markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='adm_maint_control_menu', style=get_item_style('adm_maint_control_menu')))
+                bot.edit_message_text("🔘 **صيانة أزرار البوت الرئيسية:**\nاضغط على الزر لتفعيل أو إلغاء الصيانة عنه:", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+                return
+
+            elif data == 'adm_maint_services_by_cat':
+                markup = types.InlineKeyboardMarkup(row_width=1)
+                markup.add(
+                    types.InlineKeyboardButton("📁 صيانة الأقسام الرئيسية والفرعية", callback_data='maint_menu_categories', style=get_item_style('maint_menu_categories')),
+                    types.InlineKeyboardButton("📦 صيانة الخدمات داخل الأقسام", callback_data='maint_menu_services_list', style=get_item_style('maint_menu_services_list')),
+                    types.InlineKeyboardButton("🔙 رجوع", callback_data='adm_maint_control_menu', style=get_item_style('adm_maint_control_menu'))
+                )
+                bot.edit_message_text("🛠️ **اختر نوع الصيانة المطلوب إدارتها:**", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+                return
+
+            elif data == 'maint_menu_categories':
+                markup = types.InlineKeyboardMarkup(row_width=1)
+                for cat_k, cat_v in CATEGORIES.items():
+                    st = "🛠️ (صيانة)" if is_item_in_maintenance(cat_k) else "🟢 (شغال)"
+                    markup.add(types.InlineKeyboardButton(f"{cat_v} - {st}", callback_data=f"toggle_maint_{cat_k}", style=get_item_style(cat_k)))
+                markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='adm_maint_services_by_cat', style=get_item_style('adm_maint_services_by_cat')))
+                bot.edit_message_text("📁 **صيانة الأقسام الرئيسية:**\nاضغط على القسم لتفعيل أو إلغاء الصيانة عنه:", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+                return
+
+            elif data == 'maint_menu_services_list':
+                markup = types.InlineKeyboardMarkup(row_width=1)
+                for cat_k, cat_v in CATEGORIES.items():
+                    markup.add(types.InlineKeyboardButton(f"📁 {cat_v}", callback_data=f"maint_srvs_cat_{cat_k}", style=get_item_style(cat_k)))
+                markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='adm_maint_services_by_cat', style=get_item_style('adm_maint_services_by_cat')))
+                bot.edit_message_text("📦 **اختر القسم لعرض خدماته والتحكم بصيانتها:**", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+                return
+
+            elif data.startswith('maint_srvs_cat_'):
+                cat_key = data.replace('maint_srvs_cat_', '')
+                cat_name = CATEGORIES.get(cat_key, "القسم")
+                markup = types.InlineKeyboardMarkup(row_width=1)
+                cat_services = {k: v for k, v in SERVICES.items() if v.get('category') == cat_key}
+                if not cat_services:
+                    bot.answer_callback_query(call.id, "❌ لا توجد خدمات في هذا القسم حالياً!", show_alert=True)
+                    return
+                for s_key, s_data in cat_services.items():
+                    s_name = s_data.get('name', 'خدمة')
+                    s_st = "🛠️ (صيانة)" if is_item_in_maintenance(s_key) else "🟢 (شغال)"
+                    markup.add(types.InlineKeyboardButton(f"📦 {s_name} - {s_st}", callback_data=f"toggle_maint_{s_key}", style=get_item_style(s_key)))
+                markup.add(types.InlineKeyboardButton("🔙 رجوع للأقسام", callback_data='maint_menu_services_list', style=get_item_style('maint_menu_services_list')))
+                bot.edit_message_text(f"📁 **{cat_name}**\nاختر الخدمة لتفعيل أو إلغاء الصيانة عنها:", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+                return
+
+            elif data.startswith('toggle_maint_'):
+                item_key = data.replace('toggle_maint_', '', 1)
+                is_now_maint = toggle_item_maintenance(item_key)
+                status_txt = "🛠️ (صيانة)" if is_now_maint else "🟢 (شغال)"
+                bot.answer_callback_query(call.id, f"✅ تم تحديث الحالة إلى: {status_txt}", show_alert=True)
+                return
+
+            elif data.startswith('accept_usdt_'):
+                target_uid = int(data.replace('accept_usdt_', ''))
+                points_to_add = usdt_recharge_states.get(target_uid, {}).get('points', USDT_TO_POINTS_RATE)
+                update_points(target_uid, points_to_add, is_recharge=True)
+                try:
+                    bot.send_message(target_uid, f"🎉 **تم قبول تحويل الـ USDT بنجاح!**\n⭐ تمت إضافة `{points_to_add}` نقطة إلى رصيدك ⚡", parse_mode="Markdown")
+                except Exception:
+                    pass
+                bot.answer_callback_query(call.id, "✅ تم قبول الطلب وإضافة النقاط للزبون بنجاح!", show_alert=True)
+                try:
+                    bot.edit_message_text(call.message.text + "\n\n✅ **[تم القبول وإضافة النقاط بنجاح]**", chat_id, message_id)
+                except Exception:
+                    pass
+                return
+
+            elif data.startswith('reject_usdt_'):
+                target_uid = int(data.replace('reject_usdt_', ''))
+                try:
+                    bot.send_message(target_uid, "❌ **عذراً، تم رفض طلب شحن الـ USDT الخاص بك من قبل الإدارة لعدم صحة التفاصيل أو عدم وصول التحويل.**", parse_mode="Markdown")
+                except Exception:
+                    pass
+                bot.answer_callback_query(call.id, "❌ تم رفض الطلب.", show_alert=True)
+                try:
+                    bot.edit_message_text(call.message.text + "\n\n❌ **[تم الرفض]**", chat_id, message_id)
+                except Exception:
+                    pass
+                return
+
+            elif data.startswith('delsrv_') or data.startswith('delgroup_') or data.startswith('delcat_'):
+                is_cat_del = data.startswith('delcat_')
+                loading_msg_text = "⏳ جاري حذف القسم بالكامل..." if is_cat_del else "⏳ جاري حذف الخدمة..."
+                try:
+                    bot.answer_callback_query(call.id, loading_msg_text, show_alert=False)
+                except Exception:
+                    pass
+
+                try:
+                    if is_cat_del:
+                        cat_to_del = data.replace('delcat_', '', 1).strip()
+                        if cat_to_del in CATEGORIES:
+                            cat_name = CATEGORIES[cat_to_del]
+                            keys_to_del = [k for k, v in SERVICES.items() if v.get('category') == cat_to_del]
+
+                            for k in keys_to_del:
+                                if k in SERVICES:
+                                    del SERVICES[k]
+                                try:
+                                    supabase.table("deleted_services").insert({"srv_key": k}).execute()
+                                except Exception:
+                                    pass
+
+                            del CATEGORIES[cat_to_del]
+                            try:
+                                check_category = supabase.table("deleted_categories").select("cat_key").eq("cat_key", cat_to_del).execute()
+                                if not check_category.data:
+                                    supabase.table("deleted_categories").insert({"cat_key": cat_to_del}).execute()
+                            except Exception as e:
+                                print(f"Error saving deleted category: {e}")
+
+                            try:
+                                custom_only = {key: value for key, value in SERVICES.items() if key.startswith("custom_srv_")}
+                                supabase.table("settings").upsert({
+                                    "key": "custom_services_list",
+                                    "val_text": json.dumps(custom_only, ensure_ascii=False) if custom_only else ""
+                                }, on_conflict="key").execute()
+                            except Exception as e:
+                                print(f"Error updating custom services after category delete: {e}")
+
+                            bot.answer_callback_query(call.id, f"✅ تم حذف قسم ({cat_name}) بالكامل بنجاح!", show_alert=True)
+                            admin_panel_shortcut(chat_id, message_id)
+                            return
+                        else:
+                            bot.answer_callback_query(call.id, "❌ القسم غير موجود!", show_alert=True)
+                            return
+
+                    keys_to_delete = []
+                    cat_key = 'cat_insta'
+
+                    if data.startswith('delsrv_'):
+                        srv_key = data.replace('delsrv_', '', 1).strip()
+                        if srv_key in SERVICES:
+                            keys_to_delete = [srv_key]
+                            cat_key = SERVICES[srv_key].get('category', 'cat_insta')
+                    elif data.startswith('delgroup_'):
+                        parts = data.split('_', 2)
+                        if len(parts) >= 3:
+                            cat_key = parts[1]
+                            target_srv_key = parts[2]
+                            
+                            if target_srv_key in SERVICES:
+                                keys_to_delete.append(target_srv_key)
+                                cat_key = SERVICES[target_srv_key].get('category', 'cat_insta')
+                            else:
+                                target_base_name = ""
+                                if target_srv_key in SERVICES:
+                                    target_base_name = SERVICES[target_srv_key].get('name', '')
+                                    for suffix in [' 1k', ' 2k', ' 3k', ' 4k', ' 5k', ' 10k', ' (ضمان 20 يوم)', ' ثابت', ' فلاش', ' دراجون']:
+                                        target_base_name = target_base_name.replace(suffix, '')
+                                    target_base_name = target_base_name.strip()
+
+                                for srv_k, srv_data in list(SERVICES.items()):
+                                    if srv_data.get('category') != cat_key:
+                                        continue
+                                    srv_base_name = srv_data.get('name', '')
+                                    for suffix in [' 1k', ' 2k', ' 3k', ' 4k', ' 5k', ' 10k', ' (ضمان 20 يوم)', ' ثابت', ' فلاش', ' دراجون']:
+                                        srv_base_name = srv_base_name.replace(suffix, '')
+                                    if srv_base_name.strip() == target_base_name:
+                                        keys_to_delete.append(srv_k)
+
+                    if not keys_to_delete:
+                        for srv_k, srv_data in list(SERVICES.items()):
+                            if data in srv_k or srv_k in data:
+                                keys_to_delete.append(srv_k)
+                                cat_key = srv_data.get('category', 'cat_insta')
+
+                    if not keys_to_delete:
+                        bot.answer_callback_query(call.id, "❌ لم يتم العثور على هذه الخدمة!", show_alert=True)
+                        return
+
+                    for sk in keys_to_delete:
+                        if sk in SERVICES:
+                            cat_key = SERVICES[sk].get('category', 'cat_insta')
+                            del SERVICES[sk]
+                        try:
+                            check = supabase.table("deleted_services").select("srv_key").eq("srv_key", sk).execute()
+                            if not check.data:
+                                supabase.table("deleted_services").insert({"srv_key": sk}).execute()
+                        except Exception as db_err:
+                            print(f"DB Error (deleted_services): {db_err}")
+
+                    try:
+                        custom_only = {k: v for k, v in SERVICES.items() if k.startswith('custom_srv_')}
+                        supabase.table("settings").upsert({
+                            "key": "custom_services_list",
+                            "val_text": json.dumps(custom_only, ensure_ascii=False)
+                        }, on_conflict="key").execute()
+                    except Exception as set_err:
+                        print(f"Settings Error: {set_err}")
+
+                    bot.answer_callback_query(call.id, "✅ تم حذف الخدمة بنجاح!", show_alert=False)
+                    admin_panel_shortcut(chat_id, message_id)
+                    return
+
+                except Exception as e:
+                    print(f"Critical Delete Error: {e}")
+                    bot.answer_callback_query(call.id, f"❌ حدث خطأ أثناء الحذف.", show_alert=True)
+                return
+
+        if check_spam(chat_id) or is_banned(chat_id):
+            return
+
+        if is_maintenance() and chat_id != ADMIN_ID:
+            bot.send_message(chat_id, "🛠️ البوت قيد الصيانة حالياً.")
+            return
+
+        if data in ['start', 'back_start']:
+            if not check_sub(chat_id) and chat_id != ADMIN_ID:
+                bot.send_message(chat_id, "❌ لم تشترك في القناة المطلوب الاشتراك فيها!")
+                return
+            main_menu(chat_id, message_id)
+            return
+
+        elif data == 'usdt_recharge_menu':
+            if is_item_in_maintenance('usdt_recharge_menu') and chat_id != ADMIN_ID:
+                bot.send_message(chat_id, "🛠️ خدمة شحن USDT قيد الصيانة حالياً.")
+                return
+            
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            markup.add(
+                types.InlineKeyboardButton("📤 إرسال إشعار تحويل USDT", callback_data="submit_usdt_proof", style=get_item_style('submit_usdt_proof')),
+                types.InlineKeyboardButton("🔙 رجوع للقائمة الرئيسية", callback_data='start', style=get_item_style('start'))
+            )
+            
+            text_usdt = (
+                f"🪙 **شحن الرصيد عبر العملات الرقمية (USDT - TRC20):**\n"
+                f"━━━━━━━━━━━━━━━━━━━\n\n"
+                f"📌 قم بتحويل المبلغ المطلوب إلى محفظتنا على شبكة ترون (TRC20):\n\n"
+                f"`{USDT_WALLET_ADDRESS}`\n\n"
+                f"💡 **معدل التحويل:** كل `1 USDT` = `{USDT_TO_POINTS_RATE}` نقاط.\n"
+                f"بعد إتمام التحويل، اضغط على زر (إرسال إشعار تحويل) وأرسل رقم العملية (TxID) أو تفاصيل التحويل للإدارة."
+            )
+            bot.edit_message_text(text_usdt, chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+
+        elif data == 'asiacell_recharge_menu':
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton("تسجيل دخول آسيا سيل", callback_data="asiacell_login_for_charge", style=get_item_style('asiacell_login_for_charge')))
+            markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="start", style=get_item_style('start')))
+            bot.edit_message_text("💳 لشحن رصيدك عبر آسيا سيل، ابدأ بتسجيل رقمك:", chat_id, message_id, reply_markup=markup)
+            return
+
+        elif data == 'asiacell_login_for_charge':
+            user_recharge_states.setdefault(chat_id, {})['asia_login_state'] = {'step': 'enter_phone_for_charge'}
+            msg = bot.send_message(chat_id, "📱 أدخل رقم هاتف آسيا سيل الخاص بك:")
+            bot.register_next_step_handler(msg, process_user_asiacell_phone_for_charge)
+            return
+
+        elif data.startswith('select_charge_amount_'):
+            handle_select_charge_amount(call)
+            return
+
+        # زر خدماتنا الرئيسي الذي يعرض الأقسام (انستغرام، تلجرام، آيتونز، شرائح eSIM، وشحن الألعاب)
+        elif data == 'our_services':
+            if is_item_in_maintenance('our_services') and chat_id != ADMIN_ID:
+                bot.send_message(chat_id, "🛠️ هذا القسم قيد الصيانة حالياً.")
+                return
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            for cat_k, cat_v in CATEGORIES.items():
+                if not is_item_in_maintenance(cat_k) or chat_id == ADMIN_ID:
+                    markup.add(types.InlineKeyboardButton(cat_v, callback_data=cat_k, style=get_item_style(cat_k)))
+            markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='start', style=get_item_style('start')))
+            update_menu_safely(bot, chat_id, message_id, 'our_services', markup)
+
+        elif data.startswith('sub_'):
+            bot.answer_callback_query(call.id, "📁 تم فتح القسم الفرعي بنجاح", show_alert=False)
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            
+            found_services = False
+            for k, v in SERVICES.items():
+                if v.get('subcat') == data:
+                    if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
+                        btn_text = f"{v.get('btn_label', v['name'])}"
+                        if 'price' in v:
+                            btn_text += f" ({v.get('price', 0)} ن)"
+                        
+                        markup.add(types.InlineKeyboardButton(btn_text, callback_data=k, style=get_item_style(k)))
+                        found_services = True
+
+            if not found_services:
+                markup.add(types.InlineKeyboardButton("⚠️ لا توجد خدمات مضافة هنا حالياً", callback_data='ignore', style=get_item_style('ignore')))
+
+            markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='our_services', style=get_item_style('our_services')))
+            
+            try:
+                bot.edit_message_text(
+                    "📂 **أهلاً بك في هذا القسم الفرعي.**\nاختر الخدمة المطلوبة:",
+                    chat_id, message_id, reply_markup=markup, parse_mode="Markdown"
+                )
+            except Exception:
+                pass
+            return
+
+        elif data == 'submit_usdt_proof':
+            markup_back = types.InlineKeyboardMarkup()
+            markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='usdt_recharge_menu', style=get_item_style('usdt_recharge_menu')))
+            msg = bot.send_message(chat_id, "📝 **أرسل الآن (رقم عملية التحويل TxID) والمبلغ المحول ليتم مراجعته من قبل الإدارة:**", parse_mode="Markdown", reply_markup=markup_back)
+            bot.register_next_step_handler(msg, process_usdt_proof_input)
+
+        elif data == 'cat_insta':
+            if is_item_in_maintenance('cat_insta') and chat_id != ADMIN_ID:
+                bot.send_message(chat_id, "🛠️ هذا القسم قيد الصيانة حالياً.")
+                return
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            insta_subs = SUB_CATEGORIES.get('cat_insta', [
+                {'name': '👤 قسم المتابعين', 'callback': 'insta_fol_sub_menu'},
+                {'name': '❤️ قسم اللايكات', 'callback': 'open_like_menu'},
+                {'name': '👁️ قسم المشاهدات', 'callback': 'open_view_menu'},
+                {'name': '✈️ قسم المشاركات', 'callback': 'open_share_menu'}
+            ])
+            for sub in insta_subs:
+                markup.add(types.InlineKeyboardButton(sub['name'], callback_data=sub.get('callback', 'start'), style=get_item_style(sub.get('callback', 'start'))))
+            markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='our_services', style=get_item_style('our_services')))
+            update_menu_safely(bot, chat_id, message_id, 'cat_insta', markup)
+
+        elif data == 'cat_telegram':
+            if is_item_in_maintenance('cat_telegram') and chat_id != ADMIN_ID:
+                bot.send_message(chat_id, "🛠️ هذا القسم قيد الصيانة حالياً.")
+                return
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            for sub in SUB_CATEGORIES.get('cat_telegram', []):
+                markup.add(types.InlineKeyboardButton(sub['name'], callback_data=sub.get('callback', 'start'), style=get_item_style(sub.get('callback', 'start'))))
+            for k, v in SERVICES.items():
+                if v.get('category') == 'cat_telegram' and k.startswith('custom_srv_') and not v.get('subcat'):
+                    if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
+                        markup.add(types.InlineKeyboardButton(f"✈️ {v.get('btn_label', v['name'])}", callback_data=k, style=get_item_style(k)))
+            markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='our_services', style=get_item_style('our_services')))
+            update_menu_safely(bot, chat_id, message_id, 'cat_telegram', markup)
+
+        elif data.startswith('cat_') and data != 'cat_games':
+            if is_item_in_maintenance(data) and chat_id != ADMIN_ID:
+                bot.send_message(chat_id, "🛠️ هذا القسم قيد الصيانة حالياً.")
+                return
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            found_custom = False
+            for k, v in SERVICES.items():
+                if v.get('category') == data and not v.get('subcat'):
+                    if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
+                        markup.add(types.InlineKeyboardButton(f"📦 {v.get('btn_label', v['name'])} ({v.get('price', 0)} ن)", callback_data=k, style=get_item_style(k)))
+                        found_custom = True
+            if not found_custom:
+                markup.add(types.InlineKeyboardButton("⚠️ لا توجد خدمات مضافة في هذا القسم حالياً", callback_data='ignore', style=get_item_style('ignore')))
+            markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='our_services', style=get_item_style('our_services')))
+            update_menu_safely(bot, chat_id, message_id, data, markup)
+            return
+
+        elif data == 'cat_games':
+            if is_item_in_maintenance('cat_games') and chat_id != ADMIN_ID:
+                bot.send_message(chat_id, "🛠️ هذا القسم قيد الصيانة حالياً.")
+                return
+            markup = types.InlineKeyboardMarkup(row_width=2)
+            for sub in SUB_CATEGORIES.get('cat_games', []):
+                markup.add(types.InlineKeyboardButton(sub['name'], callback_data=sub.get('callback', 'start'), style=get_item_style(sub.get('callback', 'start'))))
+            markup.add(
+                types.InlineKeyboardButton("🟡 ببجي موبايل", callback_data='pubg_menu', style=get_item_style('pubg_menu')),
+                types.InlineKeyboardButton("🔴 فري فاير", callback_data='ff_menu', style=get_item_style('ff_menu')),
+                types.InlineKeyboardButton("🎲 لودو كلوب", callback_data='ludo_menu', style=get_item_style('ludo_menu')),
+                types.InlineKeyboardButton("⚔️ كلاش أوف كلانس", callback_data='coc_menu', style=get_item_style('coc_menu')),
+                types.InlineKeyboardButton("🔙 رجوع", callback_data='our_services', style=get_item_style('our_services'))
+            )
+            update_menu_safely(bot, chat_id, message_id, 'cat_games', markup)
+
+        elif data == 'cat_itunes':
+            if is_item_in_maintenance('cat_itunes') and chat_id != ADMIN_ID:
+                bot.send_message(chat_id, "🛠️ هذا القسم قيد الصيانة حالياً.")
+                return
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            for k in ['buy_itunes_2', 'buy_itunes_3', 'buy_itunes_4', 'buy_itunes_5', 'buy_itunes_15']:
+                if k in SERVICES:
+                    s_data = SERVICES[k]
+                    if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
+                        markup.add(types.InlineKeyboardButton(f"🍎 {s_data.get('btn_label', s_data['name'])} ({s_data.get('price', 0)} ن)", callback_data=k, style=get_item_style(k)))
+            markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='our_services', style=get_item_style('our_services')))
+            update_menu_safely(bot, chat_id, message_id, 'cat_itunes', markup)
+
+        elif data == 'cat_esim':
+            if is_item_in_maintenance('cat_esim') and chat_id != ADMIN_ID:
+                bot.send_message(chat_id, "🛠️ هذا القسم قيد الصيانة حالياً.")
+                return
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            for k in ['buy_esim_month', 'buy_esim_week']:
+                if k in SERVICES:
+                    s_data = SERVICES[k]
+                    if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
+                        markup.add(types.InlineKeyboardButton(f"📱 {s_data.get('btn_label', s_data['name'])} ({s_data.get('price', 0)} ن)", callback_data=k, style=get_item_style(k)))
+            markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='our_services', style=get_item_style('our_services')))
+            update_menu_safely(bot, chat_id, message_id, 'cat_esim', markup)
+
+        elif data == 'view_my_cart':
+            if is_item_in_maintenance('view_my_cart') and chat_id != ADMIN_ID:
+                bot.send_message(chat_id, "🛠️ قسم السلة قيد الصيانة حالياً.")
+                return
+            cart = user_carts.get(chat_id, [])
+            if not cart:
+                bot.send_message(chat_id, "🛒 **سلة المشتريات فارغة حالياً.**", parse_mode="Markdown")
+                return
+
+            total_cost = sum(item['price'] for item in cart)
+            text = f"🛒 **سلة مشترياتك الحالية ({len(cart)} منتجات):**\n━━━━━━━━━━━━━━━━━━━\n\n"
+            for idx, item in enumerate(cart, 1):
+                text += f"{idx}. **{item['name']}** - {item['price']} نقطة\n🔗 `{item['link']}`\n\n"
+            text += f"💰 **إجمالي التكلفة الكلية:** `{round(total_cost, 2)}` نقطة"
+
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            markup.add(
+                types.InlineKeyboardButton("✅ تأكيد ودفع كل المنتجات بالسلة", callback_data='checkout_entire_cart', style=get_item_style('checkout_entire_cart')),
+                types.InlineKeyboardButton("🗑️ تفريغ السلة", callback_data='clear_my_cart', style=get_item_style('clear_my_cart')),
+                types.InlineKeyboardButton("🔙 العودة للقائمة", callback_data='start', style=get_item_style('start'))
+            )
+            bot.edit_message_text(text, chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+
+        elif data == 'clear_my_cart':
+            user_carts[chat_id] = []
+            bot.send_message(chat_id, "🗑️ **تم تفريغ سلة المشتريات بنجاح.**", parse_mode="Markdown")
+            main_menu(chat_id, message_id)
+
+        elif data == 'add_to_cart_now':
+            order = pending_orders_cache.get(chat_id)
+            if not order:
+                bot.send_message(chat_id, "⚠️ انتهت الجلسة.")
+                return
+
+            if chat_id not in user_carts:
+                user_carts[chat_id] = []
+            user_carts[chat_id].append(order)
+            del pending_orders_cache[chat_id]
+
+            bot.send_message(chat_id, f"🛒 **تمت إضافة ({order['name']}) إلى سلة المشتريات بنجاح!**", parse_mode="Markdown")
+            main_menu(chat_id)
+
+        elif data == 'checkout_entire_cart':
+            cart = user_carts.get(chat_id, [])
+            if not cart:
+                bot.send_message(chat_id, "❌ السلة فارغة.")
+                return
+
+            total_cost = round(sum(item['price'] for item in cart), 2)
+            user_points = get_points(chat_id)
+
+            if user_points < total_cost:
+                bot.send_message(chat_id, f"⚠️ رصيدك غير كافٍ لدفع السلة!\nرصيدك: `{user_points}` نقطة\nالمطلوب: `{total_cost}` نقطة", parse_mode="Markdown")
+                return
+
+            update_points(chat_id, -total_cost)
+            username = call.from_user.username or "لا يوجد"
+            bot.send_message(chat_id, "⏳ **جاري تنفيذ جميع طلبيات السلة...**", parse_mode="Markdown")
+            
+            success_count = 0
+            for item in cart:
+                order_id = get_next_order_id()
+                s_id = item.get('service_id', 0)
+                qty = item.get('qty', 1)
+                
+                if s_id > 0:
+                    res = send_to_api(s_id, item['link'], qty)
+                    api_id = res.get('order', '0') if isinstance(res, dict) else '0'
+                    save_order(order_id, chat_id, username, item['name'], item['price'], api_id, item['link'], s_id, qty)
+                    send_proof_to_channel(chat_id, order_id, item['name'], qty, api_id)
+                else:
+                    save_order(order_id, chat_id, username, item['name'], item['price'], "0", item['link'], 0, 1)
+                    send_proof_to_channel(chat_id, order_id, item['name'], 1, item['link'])
+                success_count += 1
+
+            user_carts[chat_id] = []
+            bot.send_message(chat_id, f"🎉 **تم تنفيذ جميع طلبات السلة بنجاح! ({success_count} طلبات)**", parse_mode="Markdown")
+
+        elif data == 'top_services':
+            if is_item_in_maintenance('top_services') and chat_id != ADMIN_ID:
+                bot.send_message(chat_id, "🛠️ هذا القسم قيد الصيانة حالياً.")
+                return
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='start', style=get_item_style('start')))
+            update_menu_safely(bot, chat_id, message_id, 'top_services', markup)
+
+        elif data == 'active_giveaways':
+            if is_item_in_maintenance('active_giveaways') and chat_id != ADMIN_ID:
+                bot.send_message(chat_id, "🛠️ قسم المسابقات قيد الصيانة حالياً.")
+                return
+            res = supabase.table("giveaways").select("*").eq("is_active", 1).execute()
+            giveaways = res.data if res.data else []
+
+            if not giveaways:
+                bot.send_message(chat_id, "🎯 **لا توجد مسابقات سارية حالياً.**", parse_mode="Markdown")
+                return
+
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            for g in giveaways:
+                markup.add(types.InlineKeyboardButton(f"🎁 {g['title']} ({g['prize_points']} نقطة)", callback_data=f"enter_gw_{g['id']}", style=get_item_style(f"enter_gw_{g['id']}")))
+            markup.add(types.InlineKeyboardButton("🔙 العودة للقائمة", callback_data='start', style=get_item_style('start')))
+            bot.edit_message_text("🏆 **اختر المسابقة للدخول والسحب العشوائي:**", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+
+        elif data.startswith('enter_gw_'):
+            gw_id = int(data.replace('enter_gw_', ''))
+            res = supabase.table("giveaway_participants").select("*").eq("giveaway_id", gw_id).eq("user_id", chat_id).execute()
+            
+            if res.data:
+                bot.send_message(chat_id, "⚠️ **أنت مشترك بالفعل بهذه المسابقة!**", parse_mode="Markdown")
+            else:
+                supabase.table("giveaway_participants").insert({"giveaway_id": gw_id, "user_id": chat_id}).execute()
+                bot.send_message(chat_id, "✅ **تم دخولك للمسابقة بنجاح!**", parse_mode="Markdown")
+
+        elif data == 'transfer_points':
+            if is_item_in_maintenance('transfer_points') and chat_id != ADMIN_ID:
+                bot.send_message(chat_id, "🛠️ خدمة تحويل النقاط قيد الصيانة حالياً.")
+                return
+            msg = bot.send_message(chat_id, "🔄 **أرسل الآيدي (ID) الخاص بالشخص المراد التحويل له:**", parse_mode="Markdown")
+            bot.register_next_step_handler(msg, process_transfer_target_id)
+
+        elif data == 'insta_fol_sub_menu':
+            if is_item_in_maintenance('insta_fol_sub_menu') and chat_id != ADMIN_ID:
+                bot.send_message(chat_id, "🛠️ هذا القسم فرعي قيد الصيانة حالياً.")
+                return
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            added_keys = set()
+            for k, v in SERVICES.items():
+                if v.get('category') == 'cat_insta' and (v.get('subcat') == 'fol' or 'متابع' in v.get('name', '')):
+                    if k in added_keys: continue
+                    added_keys.add(k)
+                    if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
+                        markup.add(types.InlineKeyboardButton(f"👤 {v.get('name', 'خدمة')}", callback_data=k, style=get_item_style(k)))
+            markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='cat_insta', style=get_item_style('cat_insta')))
+            update_menu_safely(bot, chat_id, message_id, 'insta_fol_sub_menu', markup)
+
+        elif data == 'open_like_menu':
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            added_keys = set()
+            for k, v in SERVICES.items():
+                if v.get('category') == 'cat_insta' and (v.get('subcat') == 'like' or 'لايك' in v.get('name', '')):
+                    if k in added_keys: continue
+                    added_keys.add(k)
+                    if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
+                        markup.add(types.InlineKeyboardButton(f"❤️ {v.get('name', 'خدمة')}", callback_data=k, style=get_item_style(k)))
+            markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='cat_insta', style=get_item_style('cat_insta')))
+            update_menu_safely(bot, chat_id, message_id, 'open_like_menu', markup)
+
+        elif data == 'open_view_menu':
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            added_keys = set()
+            for k, v in SERVICES.items():
+                if v.get('category') == 'cat_insta' and (v.get('subcat') == 'view' or 'مشاهد' in v.get('name', '')):
+                    if k in added_keys: continue
+                    added_keys.add(k)
+                    if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
+                        markup.add(types.InlineKeyboardButton(f"👁️ {v.get('name', 'خدمة')}", callback_data=k, style=get_item_style(k)))
+            markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='cat_insta', style=get_item_style('cat_insta')))
+            update_menu_safely(bot, chat_id, message_id, 'open_view_menu', markup)
+
+        elif data == 'open_share_menu':
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            added_keys = set()
+            for k, v in SERVICES.items():
+                if v.get('category') == 'cat_insta' and (v.get('subcat') == 'share' or 'مشارك' in v.get('name', '')):
+                    if k in added_keys: continue
+                    added_keys.add(k)
+                    if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
+                        markup.add(types.InlineKeyboardButton(f"✈️ {v.get('name', 'خدمة')}", callback_data=k, style=get_item_style(k)))
+            markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='cat_insta', style=get_item_style('cat_insta')))
+            update_menu_safely(bot, chat_id, message_id, 'open_share_menu', markup)
+
+        elif data == 'pubg_menu':
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            added_keys = set()
+            for k in ['pubg_60', 'pubg_120', 'pubg_180', 'pubg_336', 'pubg_688', 'pubg_1170']:
+                if k in SERVICES and k not in added_keys:
+                    added_keys.add(k)
+                    s_data = SERVICES[k]
+                    if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
+                        markup.add(types.InlineKeyboardButton(f"{s_data.get('btn_label', s_data['name'])} ({s_data.get('price', 0)} ن)", callback_data=k, style=get_item_style(k)))
+            markup.add(types.InlineKeyboardButton("🔙 رجوع للألعاب", callback_data='cat_games', style=get_item_style('cat_games')))
+            update_menu_safely(bot, chat_id, message_id, 'pubg_menu', markup)
+
+        elif data == 'ff_menu':
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            added_keys = set()
+            for k in ['ff_100', 'ff_210', 'ff_530', 'ff_1080']:
+                if k in SERVICES and k not in added_keys:
+                    added_keys.add(k)
+                    s_data = SERVICES[k]
+                    if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
+                        markup.add(types.InlineKeyboardButton(f"{s_data.get('btn_label', s_data['name'])} ({s_data.get('price', 0)} ن)", callback_data=k, style=get_item_style(k)))
+            markup.add(types.InlineKeyboardButton("🔙 رجوع للألعاب", callback_data='cat_games', style=get_item_style('cat_games')))
+            update_menu_safely(bot, chat_id, message_id, 'ff_menu', markup)
+
+        elif data == 'ludo_menu':
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            added_keys = set()
+            for k in ['ludo_100', 'ludo_500']:
+                if k in SERVICES and k not in added_keys:
+                    added_keys.add(k)
+                    s_data = SERVICES[k]
+                    if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
+                        markup.add(types.InlineKeyboardButton(f"{s_data.get('btn_label', s_data['name'])} ({s_data.get('price', 0)} ن)", callback_data=k, style=get_item_style(k)))
+            markup.add(types.InlineKeyboardButton("🔙 رجوع للألعاب", callback_data='cat_games', style=get_item_style('cat_games')))
+            update_menu_safely(bot, chat_id, message_id, 'ludo_menu', markup)
+
+        elif data == 'coc_menu':
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            added_keys = set()
+            for k in ['coc_500', 'coc_1200']:
+                if k in SERVICES and k not in added_keys:
+                    added_keys.add(k)
+                    s_data = SERVICES[k]
+                    if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
+                        markup.add(types.InlineKeyboardButton(f"{s_data.get('btn_label', s_data['name'])} ({s_data.get('price', 0)} ن)", callback_data=k, style=get_item_style(k)))
+            markup.add(types.InlineKeyboardButton("🔙 رجوع للألعاب", callback_data='cat_games', style=get_item_style('cat_games')))
+            update_menu_safely(bot, chat_id, message_id, 'coc_menu', markup)
+
+        elif data.startswith('custom_') and not data.startswith('custom_srv_'):
+            base_service_key = data.replace('custom_', '', 1)
+            s_info = SERVICES.get(base_service_key)
+            if s_info:
+                min_q, max_q = 1, 1000000
+                if s_info.get('service_id', 0) > 0:
+                    min_q, max_q = get_service_min_max(s_info['service_id'])
+
+                text_req = (
+                    f"✍️ **أدخل الكمية المطلوبة لـ ({s_info['name']}):**\n"
+                    f"🟢 الحد الأدنى: `{min_q}`\n"
+                    f"🔴 الحد الأقصى: `{max_q}`"
+                )
+                markup_back = types.InlineKeyboardMarkup()
+                markup_back.add(types.InlineKeyboardButton("🔙 رجوع", callback_data=s_info.get('category', 'start'), style=get_item_style(s_info.get('category', 'start'))))
+                
+                bot.edit_message_text(text_req, chat_id, message_id, reply_markup=markup_back, parse_mode="Markdown")
+                bot.register_next_step_handler(call.message, process_generic_custom_qty, base_service_key)
+
+        elif data == 'ranks_info':
+            if is_item_in_maintenance('ranks_info') and chat_id != ADMIN_ID:
+                bot.send_message(chat_id, "🛠️ هذا القسم قيد الصيانة حالياً.")
+                return
+            lvl = get_user_level(chat_id)
+            text = (
+                f"🎖️ **نظام الرتب والتخفيضات والوكلاء:**\n━━━━━━━━━━━━━━━━━━━\n\n"
+                f"مستواك الحالي: **{lvl['title']}**\n\n"
+                f"📌 **تفاصيل الرتب والخصومات:**\n"
+                f"• 👤 **مستخدم عادي:** خصم 0%\n"
+                f"• 🥉 **تاجر مبتدئ:** إنفاق 50+ نقطة (خصم 1%)\n"
+                f"• 🥈 **تاجر:** إنفاق 100+ نقطة (خصم 2%)\n"
+                f"• 🥇 **تاجر جيد:** إنفاق 150+ نقطة (خصم 3%)\n"
+                f"• 💎 **تاجر محترف:** إنفاق 200+ نقطة (خصم 4%)\n"
+                f"• 🏆 **VIP:** إنفاق 300+ نقطة (خصم 5%)\n"
+                f"• 🕶️ **وكيل معتمد:** صلاحية خاصة (خصم 8% على كل الخدمات!)\n\n"
+                f"💡 يتم تطبيق الخصم تلقائياً عند طلب أي خدمة!"
+            )
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton("🔙 العودة للقائمة", callback_data='start', style=get_item_style('start')))
+            bot.edit_message_text(text, chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+
+        elif data == 'referral_menu':
+            if is_item_in_maintenance('referral_menu') and chat_id != ADMIN_ID:
+                bot.send_message(chat_id, "🛠️ هذا القسم قيد الصيانة حالياً.")
+                return
+            referral_menu(chat_id, message_id)
+
+        elif data == 'daily_reward':
+            if is_item_in_maintenance('daily_reward') and chat_id != ADMIN_ID:
+                bot.send_message(chat_id, "🛠️ مكافأة اليوم قيد الصيانة حالياً.")
+                return
+            now = int(time.time())
+            res = supabase.table("daily_reward").select("last_claim").eq("user_id", chat_id).execute()
+            row = res.data[0] if res.data else None
+            if row and (now - row['last_claim'] < 86400):
+                remain = 86400 - (now - row['last_claim'])
+                hours, minutes = remain // 3600, (remain % 3600) // 60
+                bot.send_message(chat_id, f"⏳ لا يمكنك استلام المكافأة الآن.\nيرجى الانتظار: {hours} ساعة و {minutes} دقيقة.")
+            else:
+                update_points(chat_id, 0.1)
+                supabase.table("daily_reward").upsert({"user_id": chat_id, "last_claim": now}).execute()
+                bot.send_message(chat_id, f"🎉 تم استلام مكافأتك اليومية (0.1 نقطة) بنجاح!")
+
+        elif data == 'my_orders':
+            if is_item_in_maintenance('my_orders') and chat_id != ADMIN_ID:
+                bot.send_message(chat_id, "🛠️ قسم طلباتي قيد الصيانة حالياً.")
+                return
+            res = supabase.table("user_orders").select("*").eq("user_id", chat_id).order("order_id", desc=True).limit(5).execute()
+            orders = res.data if res.data else []
+            if not orders:
+                bot.send_message(chat_id, "📦 لا توجد لديك طلبات قائمة حالياً.")
+            else:
+                bot.send_message(chat_id, "📦 <b>سجل طلباتك الأخيرة (مع التتبع المباشر للـ API):</b>\n━━━━━━━━━━━━━━━━━━━", parse_mode="HTML")
+                for o in orders:
+                    s_name = str(o['service']).replace('<', '&lt;').replace('>', '&gt;')
+                    icon = "⏳" if "قيد" in str(o['status']) else ("❌" if "ملغي" in str(o['status']) else "✅")
+                    markup_ord = types.InlineKeyboardMarkup()
+                    if str(o.get('api_order_id')) != "0":
+                        markup_ord.add(types.InlineKeyboardButton("🔄 تحديث حالة الطلب لحظياً", callback_data=f"track_order_{o['order_id']}", style=get_item_style(f"track_order_{o['order_id']}")))
+                    
+                    text = (
+                        f"🆔 <b>رقم الطلب:</b> <code>{o['order_id']}</code>\n"
+                        f"🛍️ <b>الخدمة:</b> {s_name}\n"
+                        f"💰 <b>السعر:</b> {o['price']} نقطة\n"
+                        f"{icon} <b>الحالة:</b> {o['status']}"
+                    )
+                    bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=markup_ord if markup_ord.keyboard else None)
+
+        elif data.startswith('track_order_'):
+            o_id = int(data.replace('track_order_', ''))
+            res = supabase.table("user_orders").select("*").eq("order_id", o_id).eq("user_id", chat_id).execute()
+            if res.data:
+                ord_info = res.data[0]
+                live_info = check_order_live_status(o_id, ord_info.get('api_order_id'))
+                bot.answer_callback_query(call.id, "✅ تم جلب أحدث حالة للطلب بنجاح!", show_alert=False)
+                bot.send_message(chat_id, f"🔍 **نتيجة التتبع المباشر للطلب (`{o_id}`):**\n\n{live_info}", parse_mode="Markdown")
+
+        elif data == 'enter_voucher_code':
+            text_req = "🔑 **أرسل كود الشحن أو الهدية الآن:**"
+            markup_back = types.InlineKeyboardMarkup()
+            markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='start', style=get_item_style('start')))
+            bot.edit_message_text(text_req, chat_id, message_id, reply_markup=markup_back, parse_mode="Markdown")
+            bot.register_next_step_handler(call.message, process_user_redeem_input)
+
+        elif data in SERVICES:
+            srv_data_item = SERVICES[data]
+            if is_item_in_maintenance(data) and chat_id != ADMIN_ID:
+                bot.send_message(chat_id, "🛠️ هذه الخدمة قيد الصيانة حالياً.")
+                return
+
+            srv_key = data
+            tiers_data = (
+                srv_data_item.get('tiers') or 
+                srv_data_item.get('custom_tiers') or 
+                srv_data_item.get('tier_list')
+            )
+
+            if tiers_data and isinstance(tiers_data, list) and len(tiers_data) > 0:
+                markup = types.InlineKeyboardMarkup(row_width=2)
+                for t in tiers_data:
+                    t_qty = t.get('qty', 1000)
+                    t_price = get_service_price(chat_id, float(t.get('price', 1.0)))
+                    btn_label = f"{t_qty} ({t_price} نقطة)"
+                    markup.add(types.InlineKeyboardButton(btn_label, callback_data=f"buytier_{srv_key}_{t_qty}", style=get_item_style(f"buytier_{srv_key}_{t_qty}")))
+                
+                markup.add(types.InlineKeyboardButton("✍️ اختيار العدد بنفسك (يدوي)", callback_data=f"custom_{srv_key}", style=get_item_style(f"custom_{srv_key}")))
+                markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='our_services', style=get_item_style('our_services')))
+                
+                custom_desc = srv_data_item.get('msg', 'اختر الكمية المطلوبة من الأزرار أدناه أو أدخلها يدوياً:')
+                text_menu = f"📦 **{srv_data_item['name']}**\n━━━━━━━━━━━━━━━━━━━\n\n{custom_desc}\n\nاختر الكمية المطلوبة:"
+                try:
+                    bot.edit_message_text(text_menu, chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+                except Exception:
+                    bot.send_message(chat_id, text_menu, reply_markup=markup, parse_mode="Markdown")
+                return
+
+            if srv_data_item.get('category') in ['cat_itunes', 'cat_esim'] or srv_data_item.get('service_id') == 0:
+                final_price = get_service_price(chat_id, srv_data_item.get('price', 1.0))
+                
+                pending_orders_cache[chat_id] = {
+                    'service_id': 0,
+                    'qty': 1,
+                    'name': srv_data_item['name'],
+                    'price': final_price,
+                    'link': 'بطاقة رقمية / خدمة مباشرة'
+                }
+                
+                markup_confirm = types.InlineKeyboardMarkup(row_width=1)
+                markup_confirm.add(
+                    types.InlineKeyboardButton("🛒 إضافة لسلة المشتريات", callback_data='add_to_cart_now', style=get_item_style('add_to_cart_now')),
+                    types.InlineKeyboardButton("✅ تأكيد الشراء الآن", callback_data='confirm_order_now', style=get_item_style('confirm_order_now')),
+                    types.InlineKeyboardButton("❌ إلغاء الطلب", callback_data='cancel_order_now', style=get_item_style('cancel_order_now')),
+                    types.InlineKeyboardButton("🔙 رجوع", callback_data='our_services', style=get_item_style('our_services'))
+                )
+                
+                text_confirm = (
+                    f"🧾 **تأكيد ملخص الطلب:**\n"
+                    f"━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"📦 المنتج: {srv_data_item['name']}\n"
+                    f"💰 السعر النهائي: `{final_price}` نقطة"
+                )
+                
+                try:
+                    bot.edit_message_text(text_confirm, chat_id, message_id, reply_markup=markup_confirm, parse_mode="Markdown")
+                except Exception:
+                    bot.send_message(chat_id, text_confirm, reply_markup=markup_confirm, parse_mode="Markdown")
+                return
+
+            base_price = float(srv_data_item.get('price', 1.0))
+            final_price = get_service_price(chat_id, base_price)
+            api_qty = srv_data_item.get('qty', 1000)
+
+            text_req = (
+                f"📦 **{srv_data_item['name']}**\n"
+                f"━━━━━━━━━━━━━━━━━━━\n\n"
+                f"🔗 أرسل الرابط أو المعرف المطلوب الآن:\n"
+                f"*(السعر: {final_price} نقطة)*"
+            )
+            
+            markup_back = types.InlineKeyboardMarkup()
+            markup_back.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='our_services', style=get_item_style('our_services')))
+            
+            try:
+                bot.edit_message_text(text_req, chat_id, message_id, reply_markup=markup_back, parse_mode="Markdown")
+            except Exception:
+                bot.send_message(chat_id, text_req, reply_markup=markup_back, parse_mode="Markdown")
+
+            if srv_data_item['service_id'] == 0:
+                bot.register_next_step_handler(call.message, prepare_order_summary_direct, final_price, srv_data_item['name'])
+            else:
+                bot.register_next_step_handler(call.message, prepare_order_summary, final_price, srv_data_item['service_id'], api_qty, srv_data_item['name'])
+
+        elif data.startswith('buytier_'):
+            try:
+                clean_data = data.replace('buytier_', '', 1)
+                srv_key, qty_str = clean_data.rsplit('_', 1)
+                target_qty = int(qty_str)
+                
+                if srv_key in SERVICES:
+                    s_data = SERVICES[srv_key]
+                    tiers_list = s_data.get('tiers') or s_data.get('custom_tiers', [])
+                    selected_tier = next((t for t in tiers_list if int(t['qty']) == target_qty), None)
+                    
+                    if selected_tier:
+                        final_price = get_service_price(chat_id, float(selected_tier['price']))
+                        api_qty_to_send = int(selected_tier['api_qty'])
+                        
+                        text_req = f"🔗 أرسل الرابط أو المعرف المطلوب الآن:\n*(الكمية المختارة: {target_qty} - السعر: {final_price} نقطة)*"
+                        markup_back = types.InlineKeyboardMarkup()
+                        markup_back.add(types.InlineKeyboardButton("🔙 رجوع", callback_data=srv_key, style=get_item_style(srv_key)))
+                        
+                        bot.edit_message_text(text_req, chat_id, message_id, reply_markup=markup_back, parse_mode="Markdown")
+                        bot.register_next_step_handler(
+                            call.message, 
+                            prepare_order_summary, 
+                            final_price, 
+                            s_data['service_id'], 
+                            api_qty_to_send, 
+                            f"{s_data['name']} ({target_qty})"
+                        )
+            except Exception as e:
+                print(f"Error in buytier handler: {e}")
+
+        elif data == 'confirm_order_now':
+            order_data = pending_orders_cache.get(chat_id)
+            if not order_data:
+                bot.send_message(chat_id, "⚠️ انتهت جلسة الطلب، يرجى إعادة المحاولة.")
+                return
+
+            final_price = order_data['price']
+            user_points = get_points(chat_id)
+
+            if user_points < final_price:
+                bot.send_message(chat_id, f"⚠️ رصيدك غير كافٍ!\nرصيدك: {user_points} نقطة\nالمطلوب: {final_price} نقطة")
+                return
+
+            update_points(chat_id, -final_price)
+            del pending_orders_cache[chat_id]
+
+            if order_data['service_id'] > 0:
+                bot.send_message(chat_id, "⏳ **جاري إرسال طلبك عبر الـ API...**", parse_mode="Markdown")
+                res = send_to_api(order_data['service_id'], order_data['link'], order_data['qty'])
+                if res and isinstance(res, dict) and 'order' in res:
+                    username = call.from_user.username or "غير معروف"
+                    order_id = get_next_order_id()
+                    api_id = res['order']
+                    save_order(order_id, chat_id, username, order_data['name'], final_price, api_id, order_data['link'], order_data['service_id'], order_data['qty'])
+                    bot.send_message(chat_id, f"✅ **تم إرسال طلبك بنجاح!**\n🆔 رقم الطلب: `{order_id}`\n🔖 رقم الـ API: `{api_id}`", parse_mode="Markdown")
+                    send_proof_to_channel(chat_id, order_id, order_data['name'], order_data['qty'], api_id)
+                    notify_admin_new_order(chat_id, username, order_id, order_data['name'], final_price, order_data['link'])
+                else:
+                    update_points(chat_id, final_price)
+                    bot.send_message(chat_id, f"❌ **فشل إرسال الطلب، تم إعادة النقاط لرصيدك تلقائياً.**", parse_mode="Markdown")
+            else:
+                order_id = get_next_order_id()
+                username = call.from_user.username or "لا يوجد"
+                link_info = order_data.get('link', 'خدمة مباشرة')
+                save_order(order_id, chat_id, username, order_data['name'], final_price, "0", link_info, 0, 1)
+                bot.send_message(ADMIN_ID, f"📦 **طلب جديد (يدوي/لعبة):**\n🆔 رقم الطلب: `{order_id}`\n👤 المستخدم: `{chat_id}` (@{username})\n📦 الخدمة: {order_data['name']}\n🎮 التفاصيل: `{link_info}`", parse_mode="Markdown")
+                bot.send_message(chat_id, f"✅ **تم استلام طلبك بنجاح!**\n🆔 رقم الطلب: `{order_id}`\n📩 تواصل مع الدعم لاستلام الطلب: {SUPPORT_USER}", parse_mode="Markdown")
+                send_proof_to_channel(chat_id, order_id, order_data['name'], 1, link_info)
+
+        elif data == 'cancel_order_now':
+            if chat_id in pending_orders_cache:
+                del pending_orders_cache[chat_id]
+            bot.send_message(chat_id, "❌ **تم إلغاء الطلب.**", parse_mode="Markdown")
+
+    except Exception as e:
+        print(f"Callback Error: {e}")
+
+# ==========================================
+# معالجات رسائل النصوص والخطوات (Steps)
+# ==========================================
+def process_admin_edit_service_desc(message):
+    chat_id = message.chat.id
+    if chat_id != ADMIN_ID: return
+    st = admin_states.get(chat_id)
+    if not st or st.get('action') != 'edit_service_desc':
+        return
+    
+    service_key = st.get('service_key')
+    new_desc = message.text.strip()
+    
+    if service_key in SERVICES:
+        SERVICES[service_key]['msg'] = new_desc
+        
+        if service_key.startswith('custom_srv_'):
+            try:
+                custom_only = {k: v for k, v in SERVICES.items() if k.startswith('custom_srv_')}
+                supabase.table("settings").upsert({
+                    "key": "custom_services_list",
+                    "val_text": json.dumps(custom_only, ensure_ascii=False)
+                }, on_conflict="key").execute()
+            except Exception as e:
+                print(f"Error updating custom service msg in DB: {e}")
+
+        bot.send_message(chat_id, f"✅ **تم تحديث وصف الخدمة بنجاح!**\n\n📝 الوصف الجديد:\n{new_desc}", parse_mode="Markdown")
+    else:
+        bot.send_message(chat_id, "❌ حدث خطأ: لم يتم العثور على الخدمة.")
+        
+    del admin_states[chat_id]
+
+def process_admin_user_search(message):
+    chat_id = message.chat.id
+    if chat_id != ADMIN_ID: return
+    query_str = message.text.strip()
+    u = find_user_by_id_or_username(query_str)
+    
+    if not u:
+        bot.send_message(chat_id, "❌ **لم يتم العثور على هذا المستخدم في قاعدة البيانات!**", parse_mode="Markdown")
+        return
+        
+    uid = u['user_id']
+    uname = u.get('username', 'لا يوجد')
+    fname = u.get('first_name', 'بدون اسم')
+    pts = u.get('points', 0.0)
+    recharged = u.get('total_recharged', 0.0)
+    spent = u.get('total_spent', 0.0)
+    is_res = int(u.get('is_reseller', 0))
+    is_res_text = "وكيل معتمد 🏆" if is_res == 1 else "مستخدم عادي 👤"
+    
+    sub_status = "مشترك ✅" if check_sub(uid) else "غير مشترك بالقناة ❌"
+
+    orders_str = ""
+    try:
+        ord_res = supabase.table("user_orders").select("order_id, service, status, price").eq("user_id", uid).order("order_id", desc=True).limit(3).execute()
+        if ord_res.data:
+            orders_str = "\n📦 **آخر الطلبات:**\n"
+            for ord_item in ord_res.data:
+                orders_str += f"• `#{ord_item['order_id']}` | {ord_item['service']} ({ord_item['status']})\n"
+    except Exception:
+        pass
+
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("💰 تعديل الرصيد", callback_data=f"admin_add_pts_{uid}", style=get_item_style(f"admin_add_pts_{uid}")),
+        types.InlineKeyboardButton("💬 رسالة مباشرة", callback_data=f"admin_msg_{uid}", style=get_item_style(f"admin_msg_{uid}"))
+    )
+    if is_res == 1:
+        markup.add(types.InlineKeyboardButton("❌ إلغاء رتبة وكيل معتمد", callback_data=f"admin_demote_{uid}", style=get_item_style(f"admin_demote_{uid}")))
+    else:
+        markup.add(types.InlineKeyboardButton("🕶️ ترقية إلى وكيل معتمد", callback_data=f"admin_promote_single_{uid}", style=get_item_style(f"admin_promote_single_{uid}")))
+        
+    markup.add(types.InlineKeyboardButton("🔙 لوحة الإدارة", callback_data="admin_panel", style=get_item_style('admin_panel')))
+    
+    text = (
+        f"👤 **الملف الشامل للمستخدم:**\n"
+        f"━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🆔 الآيدي: `{uid}`\n"
+        f"🔹 الاسم: {fname}\n"
+        f"🔹 اليوزر: @{uname}\n"
+        f"💰 الرصيد: `{pts}` نقطة\n"
+        f"💳 إجمالي الشحن: `{recharged}` نقطة\n"
+        f"🛍️ إجمالي الإنفاق: `{spent}` نقطة\n"
+        f"🎖️ الرتبة: {is_res_text}\n"
+        f"📢 حالة القناة: {sub_status}"
+        f"{orders_str}"
+    )
+    bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=markup)
+
+def process_admin_promote_reseller(message):
+    chat_id = message.chat.id
+    if chat_id != ADMIN_ID: return
+    try:
+        target_uid = int(message.text.strip())
+        promote_user_to_reseller(ADMIN_ID, target_uid)
+    except ValueError:
+        bot.send_message(chat_id, "⚠️ يرجى إدخال ID صحيح بالأرقام فقط.")
+
+def process_admin_modify_points(message):
+    chat_id = message.chat.id
+    if chat_id != ADMIN_ID: return
+    st = admin_states.get(chat_id)
+    if not st or st.get('action') != 'add_pts':
+        return
+    target_uid = st.get('target')
+    try:
+        val = float(message.text.strip())
+        update_points(target_uid, val)
+        bot.send_message(chat_id, f"✅ **تم تعديل رصيد المستخدم (`{target_uid}`) بمقدار ({val}) نقطة بنجاح!**", parse_mode="Markdown")
+        try:
+            bot.send_message(target_uid, f"🎁 **تم تحديث رصيدك من قبل الإدارة بمقدار ({val}) نقطة!**", parse_mode="Markdown")
+        except Exception:
+            pass
+        del admin_states[chat_id]
+    except ValueError:
+        bot.send_message(chat_id, "⚠️ يرجى إدخال رقم صحيح بالنقاط.")
+
+def process_admin_send_direct_msg(message):
+    chat_id = message.chat.id
+    if chat_id != ADMIN_ID: return
+    st = admin_states.get(chat_id)
+    if not st or st.get('action') != 'send_msg':
+        return
+    target_uid = st.get('target')
+    msg_text = message.text.strip()
+    try:
+        bot.send_message(target_uid, f"📬 **رسالة إدارية خاصة:**\n\n{msg_text}", parse_mode="Markdown")
+        bot.send_message(chat_id, f"✅ **تم إرسال الرسالة للمستخدم (`{target_uid}`) بنجاح!**", parse_mode="Markdown")
+    except Exception as e:
+        bot.send_message(chat_id, f"❌ فشل إرسال الرسالة: {e}")
+    del admin_states[chat_id]
+
+def process_admin_broadcast_execution(message):
+    chat_id = message.chat.id
+    if chat_id != ADMIN_ID: return
+    st = admin_states.get(chat_id)
+    if not st or st.get('action') != 'broadcast':
+        return
+    b_type = st.get('type')
+    del admin_states[chat_id]
+    
+    start_time = time.time()
+    try:
+        page = 0
+        batch_size = 1000
+        success = 0
+        blocked = 0
+        failed = 0
+        now = time.time()
+        
+        while True:
+            res = supabase.table("users").select("user_id, last_order_ts").range(page * batch_size, (page + 1) * batch_size - 1).execute()
+            users = res.data if res.data else []
+            if not users:
+                break
+
+            for u in users:
+                uid = u['user_id']
+                if b_type == 'inactive':
+                    last_o = u.get('last_order_ts', 0)
+                    if now - last_o < 604800:
+                        continue
+                        
+                try:
+                    sent_msg = bot.copy_message(chat_id=uid, from_chat_id=chat_id, message_id=message.message_id)
+                    if b_type == 'pin':
+                        try:
+                            bot.pin_chat_message(chat_id=uid, message_id=sent_msg.message_id)
+                        except Exception:
+                            pass
+                    success += 1
+                    time.sleep(0.04)
+                except Exception as e:
+                    err_str = str(e).lower()
+                    if "blocked" in err_str or "deactivated" in err_str or "chat not found" in err_str:
+                        blocked += 1
+                    else:
+                        failed += 1
+            
+            if len(users) < batch_size:
+                break
+            page += 1
+
+        elapsed_time = round(time.time() - start_time, 2)
+        report_text = (
+            f"📢 **تقرير الإذاعة التفصيلي:**\n"
+            f"━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🟢 وصلَت بنجاح: `{success}` مستخدم\n"
+            f"🔴 حظروا البوت (أو غير مفعل): `{blocked}` شخص\n"
+            f"⚠️ فشل الإرسال (أخطاء أخرى): `{failed}` شخص\n"
+            f"⏱️ استغرقت العملية: `{elapsed_time}` ثانية"
+        )
+        bot.send_message(chat_id, report_text, parse_mode="Markdown")
+    except Exception as e:
+        bot.send_message(chat_id, f"❌ حدث خطأ أثناء الإذاعة: {e}")
+
+def process_usdt_proof_input(message):
+    chat_id = message.chat.id
+    proof_text = message.text.strip()
+    username = message.from_user.username or "لا يوجد"
+
+    if proof_text.startswith('/'):
+        return
+
+    usdt_recharge_states[chat_id] = {'points': USDT_TO_POINTS_RATE}
+
+    markup_admin = types.InlineKeyboardMarkup(row_width=2)
+    markup_admin.add(
+        types.InlineKeyboardButton("✅ قبول وإضافة النقاط", callback_data=f"accept_usdt_{chat_id}", style=get_item_style(f"accept_usdt_{chat_id}")),
+        types.InlineKeyboardButton("❌ رفض الطلب", callback_data=f"reject_usdt_{chat_id}", style=get_item_style(f"reject_usdt_{chat_id}"))
+    )
+
+    admin_msg = (
+        f"🪙 **طلب شحن USDT جديد بانتظار التأكيد!**\n"
+        f"━━━━━━━━━━━━━━━━━━━\n\n"
+        f"👤 الآيدي: `{chat_id}`\n"
+        f"👤 اليوزر: @{username}\n"
+        f"📄 تفاصيل العملية / TxID:\n`{proof_text}`"
+    )
+    
+    try:
+        bot.send_message(ADMIN_ID, admin_msg, parse_mode="Markdown", reply_markup=markup_admin)
+    except Exception as e:
+        print(f"Error notifying admin about USDT: {e}")
+
+    bot.send_message(chat_id, "✅ **تم إرسال إشعار التحويل إلى الإدارة بنجاح!**\nسيتم مراجعة العملية وإضافة النقاط إلى رصيدك بأقرب وقت ⏳", parse_mode="Markdown")
+    main_menu(chat_id)
+
+def step_add_category_key(message):
+    chat_id = message.chat.id
+    cat_key = message.text.strip().lower()
+    if not cat_key.startswith('cat_'): 
+        cat_key = f"cat_{cat_key}"
+    temp_add_service[chat_id] = {'new_cat_key': cat_key}
+    msg = bot.send_message(chat_id, "📁 **أدخل اسم القسم الذي سيظهر للمستخدمين:**", parse_mode="Markdown")
+    bot.register_next_step_handler(msg, step_add_category_name)
+
+def step_add_category_name(message):
+    chat_id = message.chat.id
+    cat_name = message.text.strip()
+    data = temp_add_service.get(chat_id)
+    if not data: 
+        return
+    cat_key = data['new_cat_key']
+    CATEGORIES[cat_key] = cat_name
+    bot.send_message(chat_id, f"✅ **تم إضافة القسم الجديد ({cat_name}) بنجاح!**", parse_mode="Markdown")
+    del temp_add_service[chat_id]
+
+def step_subcat_name(message):
+    chat_id = message.chat.id
+    subcat_name = message.text.strip()
+    data = temp_add_service.get(chat_id)
+    if not data:
+        return
+    cat_key = data.get('category')
+    
+    global SUB_CATEGORIES
+    if cat_key not in SUB_CATEGORIES:
+        SUB_CATEGORIES[cat_key] = []
+        
+    sub_key_id = f"sub_{int(time.time())}"
+    SUB_CATEGORIES[cat_key].append({'name': subcat_name, 'callback': sub_key_id})
+    
+    try:
+        supabase.table("settings").upsert({
+            "key": "custom_sub_categories",
+            "val_text": json.dumps(SUB_CATEGORIES, ensure_ascii=False)
+        }, on_conflict="key").execute()
+    except Exception as e:
+        print(f"Error saving sub categories: {e}")
+
+    bot.send_message(chat_id, f"✅ **تم حفظ وعرض القسم الفرعي ({subcat_name}) بنجاح في قاعدة البيانات دائمياً!**", parse_mode="Markdown")
+    del temp_add_service[chat_id]
+
+def step_srv_name(message):
+    chat_id = message.chat.id
+    if chat_id not in temp_add_service:
+        temp_add_service[chat_id] = {'category': 'cat_insta'}
+    temp_add_service[chat_id]['name'] = message.text.strip()
+    msg = bot.send_message(chat_id, "🆔 أرسل Service ID (أو 0 لليدوي):", parse_mode="Markdown")
+    bot.register_next_step_handler(msg, step_srv_id)
+
+def step_srv_id(message):
+    chat_id = message.chat.id
+    try:
+        temp_add_service[chat_id]['service_id'] = int(message.text.strip())
+        
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("تخطي الوصف ⏭️", callback_data="skip_srv_desc", style=get_item_style('skip_srv_desc')))
+        markup.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
+        
+        msg = bot.send_message(
+            chat_id, 
+            "📝 **أرسل الآن وصف الخدمة أو التعليمات التي ستظهر للمستخدم عند الطلب:**\n*(أو اضغط على زر تخطي أدناه لتجاوز هذه الخطوة)*", 
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+        bot.register_next_step_handler(msg, step_srv_desc_input)
+    except ValueError:
+        markup_back = types.InlineKeyboardMarkup()
+        markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
+        msg = bot.send_message(chat_id, "⚠️ أدخل رقماً صحيحاً للـ ID:", reply_markup=markup_back)
+        bot.register_next_step_handler(msg, step_srv_id)
+
+def step_srv_desc_input(message):
+    chat_id = message.chat.id
+    text_val = message.text.strip()
+    if chat_id in temp_add_service:
+        temp_add_service[chat_id]['msg'] = text_val
+    ask_for_tiers_input(chat_id)
+
+def ask_for_tiers_input(chat_id):
+    markup_back = types.InlineKeyboardMarkup()
+    markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
+    
+    msg = bot.send_message(
+        chat_id, 
+        "⚙️ **أرسل التيرات بالصيغة:**\n`الكمية:السعر:كمية_API`\n\n*مثال:*\n`1000:1.5:1100`\n`2000:3.0:2200`\n\n*(أو أرسل كلمة `إلغاء` للخروج)*", 
+        parse_mode="Markdown",
+        reply_markup=markup_back
+    )
+    bot.register_next_step_handler(msg, step_srv_save_final)
+
+def step_srv_save_final(message):
+    chat_id = message.chat.id
+    text_val = message.text.strip()
+    
+    if text_val == "إلغاء":
+        if chat_id in temp_add_service:
+            del temp_add_service[chat_id]
+        bot.send_message(chat_id, "❌ تم إلغاء إضافة الخدمة.")
+        return
+
+    srv = temp_add_service.get(chat_id)
+    if not srv: 
+        return
+    try:
+        tiers = []
+        for p in text_val.split():
+            sub = p.split(':')
+            if len(sub) == 3:
+                try:
+                    tiers.append({
+                        'qty': int(sub[0]), 
+                        'price': float(sub[1]), 
+                        'api_qty': int(sub[2])
+                    })
+                except ValueError:
+                    continue
+        
+        if not tiers:
+            markup_back = types.InlineKeyboardMarkup()
+            markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
+            msg = bot.send_message(chat_id, "⚠️ الصيغة غير صحيحة! يرجى إعادة إرسال التيرات بالشكل المطلوب:", reply_markup=markup_back)
+            bot.register_next_step_handler(msg, step_srv_save_final)
+            return
+            
+        key = f"custom_srv_{int(time.time())}"
+        SERVICES[key] = {
+            'name': srv['name'], 
+            'btn_label': srv['name'][:30],
+            'service_id': srv['service_id'], 
+            'category': srv['category'],
+            'subcat': srv.get('subcat'),
+            'msg': srv.get('msg', 'أرسل الرابط المطلوب:'), 
+            'is_custom_tiers': True, 
+            'tiers': tiers
+        }
+        
+        custom_only = {k: v for k, v in SERVICES.items() if k.startswith('custom_srv_')}
+        supabase.table("settings").upsert({
+            "key": "custom_services_list", 
+            "val_text": json.dumps(custom_only, ensure_ascii=False)
+        }, on_conflict="key").execute()
+        
+        bot.send_message(chat_id, "✅ **تمت إضافة وحفظ الخدمة مع الوصف والتيرات بنجاح داخل القسم المحدد!**", parse_mode="Markdown")
+        del temp_add_service[chat_id]
+    except Exception as e:
+        markup_back = types.InlineKeyboardMarkup()
+        markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
+        msg = bot.send_message(chat_id, f"❌ حدث خطأ أثناء الحفظ: {e}", reply_markup=markup_back)
+        bot.register_next_step_handler(msg, step_srv_save_final)
+
+def process_generic_custom_qty(message, base_service_key):
+    chat_id = message.chat.id
+    if message.text and message.text.startswith('/'):
+        return
+
+    try:
+        qty = int(message.text.strip())
+        service_data = SERVICES.get(base_service_key)
+        
+        markup_back = types.InlineKeyboardMarkup()
+        markup_back.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='our_services', style=get_item_style('our_services')))
+
+        min_qty, max_qty = 1, 1000000
+        if service_data and service_data.get('service_id', 0) > 0:
+            min_qty, max_qty = get_service_min_max(service_data['service_id'])
+
+        if qty < min_qty or qty > max_qty:
+            bot.send_message(
+                chat_id, 
+                f"⚠️ **الكمية المدخلة غير مطابقة لشروط المزود!**\nمسموح من (`{min_qty}`) إلى (`{max_qty}`). يرجى إرسال كمية صحيحة:", 
+                reply_markup=markup_back, 
+                parse_mode="Markdown"
+            )
+            bot.register_next_step_handler(message, process_generic_custom_qty, base_service_key)
+            return
+
+        if not service_data:
+            bot.send_message(chat_id, "❌ تعذر العثور على بيانات الخدمة.", reply_markup=markup_back)
+            return
+
+        if 'tiers' in service_data and service_data['tiers']:
+            first_tier = service_data['tiers'][0]
+            price_per_1000 = (first_tier['price'] / first_tier['qty']) * 1000
+        else:
+            price_per_1000 = service_data.get('price', 1.0)
+
+        cost_for_qty = (qty / 1000.0) * price_per_1000
+        final_price = get_service_price(chat_id, cost_for_qty)
+
+        msg_prompt = "🔗 أرسل الرابط أو المعرف المطلوب الآن:"
+        msg = bot.send_message(chat_id, f"{msg_prompt}\n(السعر النهائي لـ {qty} وحدة: {final_price} نقطة)", reply_markup=markup_back)
+        bot.register_next_step_handler(msg, prepare_order_summary, final_price, service_data['service_id'], qty, f"{service_data['name']} ({qty})")
+
+    except ValueError:
+        markup_back = types.InlineKeyboardMarkup()
+        markup_back.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='our_services', style=get_item_style('our_services')))
+        bot.send_message(chat_id, "⚠️ يرجى إدخال أرقام صحيحة فقط:", reply_markup=markup_back)
+
+def process_update_single_price(message, service_key):
+    try:
+        new_price = float(message.text.strip())
+        if new_price <= 0:
+            bot.send_message(message.chat.id, "❌ السعر يجب أن يكون أكبر من 0.")
+            return
+
+        old_price = SERVICES[service_key].get('price', 0)
+        SERVICES[service_key]['price'] = new_price
+
+        bot.send_message(
+            message.chat.id,
+            f"✅ **تم تحديث سعر الخدمة بنجاح!**\n\n📌 الخدمة: {SERVICES[service_key]['name']}\n💰 السعر القديم: `{old_price}`\n🏷️ السعر الجديد: `{new_price}`",
+            parse_mode="Markdown"
+        )
+    except ValueError:
+        bot.send_message(message.chat.id, "⚠️ يرجى إدخال رقم صحيح.")
+
+def process_update_bulk_price_decrease(message):
+    try:
+        pct = float(message.text.strip())
+        if pct <= 0:
+            bot.send_message(message.chat.id, "⚠️ النسبة يجب أن تكون أكبر من 0.")
+            return
+        multiplier = 1 - (pct / 100)
+        for k in SERVICES:
+            if 'price' in SERVICES[k]:
+                old_p = SERVICES[k]['price']
+                SERVICES[k]['price'] = max(0.1, round(old_p * multiplier, 2))
+            if 'tiers' in SERVICES[k]:
+                for tier in SERVICES[k]['tiers']:
+                    tier['price'] = max(0.1, round(tier['price'] * multiplier, 2))
+
+        custom_only = {k: v for k, v in SERVICES.items() if k.startswith('custom_srv_')}
+        if custom_only:
+            supabase.table("settings").upsert({
+                "key": "custom_services_list", 
+                "val_text": json.dumps(custom_only, ensure_ascii=False)
+            }, on_conflict="key").execute()
+
+        bot.send_message(message.chat.id, f"✅ **تم خفض جميع أسعار البوت بنسبة ({pct}%) بنجاح!**", parse_mode="Markdown")
+    except ValueError:
+        bot.send_message(message.chat.id, "⚠️ يرجى إدخال نسبة مئوية صحيحة.")
+
+def process_update_bulk_price_increase(message):
+    try:
+        pct = float(message.text.strip())
+        if pct <= 0:
+            bot.send_message(message.chat.id, "⚠️ النسبة يجب أن تكون أكبر من 0.")
+            return
+        multiplier = 1 + (pct / 100)
+        for k in SERVICES:
+            if 'price' in SERVICES[k]:
+                old_p = SERVICES[k]['price']
+                SERVICES[k]['price'] = round(old_p * multiplier, 2)
+            if 'tiers' in SERVICES[k]:
+                for tier in SERVICES[k]['tiers']:
+                    tier['price'] = round(tier['price'] * multiplier, 2)
+
+        custom_only = {k: v for k, v in SERVICES.items() if k.startswith('custom_srv_')}
+        if custom_only:
+            supabase.table("settings").upsert({
+                "key": "custom_services_list", 
+                "val_text": json.dumps(custom_only, ensure_ascii=False)
+            }, on_conflict="key").execute()
+
+        bot.send_message(message.chat.id, f"✅ **تم زيادة جميع أسعار البوت بنسبة ({pct}%) بنجاح!**", parse_mode="Markdown")
+    except ValueError:
+        bot.send_message(message.chat.id, "⚠️ يرجى إدخال نسبة مئوية صحيحة.")
+
+def process_gen_card(message):
+    try:
+        amount = float(message.text.strip())
+        if amount <= 0: return
+        code_suffix = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
+        card_code = f"CARD-{code_suffix}"
+        supabase.table("vouchers").insert({"code": card_code, "amount": amount}).execute()
+        bot_username = bot.get_me().username
+        direct_link = f"https://t.me/{bot_username}?start={card_code}"
+        bot.send_message(message.chat.id, f"✅ **تم إنشاء كود الشحن الفردي:**\n💰 القيمة: {amount}\n🔑 الكود: `{card_code}`\n🔗 الرابط المباشر:\n`{direct_link}`", parse_mode="Markdown")
+    except Exception:
+        bot.send_message(message.chat.id, "⚠️ خطأ في إدخال القيمة.")
+
+def process_gen_gift_code(message):
+    try:
+        parts = message.text.strip().split()
+        code = parts[0].upper()
+        pts = float(parts[1])
+        uses = int(parts[2])
+        supabase.table("gift_codes").insert({"code": code, "points": pts, "max_uses": uses, "used_count": 0}).execute()
+        bot.send_message(message.chat.id, f"✅ **تم إنشاء كود الهدية العامة:**\n🔑 الكود: `{code}`\n💰 النقاط: {pts}\n👥 السعة: لـ {uses} شخص", parse_mode="Markdown")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"⚠️ خطأ في الإدخال: {e}")
+
+def process_create_giveaway(message):
+    try:
+        parts = [p.strip() for p in message.text.split('-')]
+        title = parts[0]
+        pts = float(parts[1])
+        winners = int(parts[2])
+        supabase.table("giveaways").insert({"title": title, "prize_points": pts, "winners_count": winners, "is_active": 1}).execute()
+        bot.send_message(message.chat.id, f"🎉 **تم نشر المسابقة بنجاح!**\n🏆 العنوان: {title}\n💰 الجائزة: {pts} نقطة\n👥 عدد الفائزين: {winners}", parse_mode="Markdown")
+        try:
+            bot_username = bot.get_me().username
+            gw_text = f"🎯 **مسابقة جديدة في البوت!**\n\n🏆 العنوان: {title}\n💰 جائزة الفائز: {pts} نقطة\n👥 عدد الفائزين: {winners}\n\n👉 شارك الآن عبر الرابط:\nhttps://t.me/{bot_username}"
+            bot.send_message(PROOFS_CHANNEL, gw_text, parse_mode="Markdown")
+        except Exception:
+            pass
+    except Exception as e:
+        bot.send_message(message.chat.id, f"⚠️ خطأ بالإدخال: {e}")
+
+def process_transfer_target_id(message):
+    chat_id = message.chat.id
+    try:
+        target_id = int(message.text.strip())
+        if target_id == chat_id:
+            bot.send_message(chat_id, "❌ لا يمكنك تحويل النقاط لنفسك!")
+            return
+        if not get_user(target_id):
+            bot.send_message(chat_id, "❌ المستلم غير موجود بالبوت!")
+            return
+        transfer_cache[chat_id] = {'target_id': target_id}
+        msg = bot.send_message(chat_id, "💰 **أدخل عدد النقاط المراد تحويلها (عمولة 5%):**", parse_mode="Markdown")
+        bot.register_next_step_handler(msg, process_transfer_amount)
+    except ValueError:
+        bot.send_message(chat_id, "⚠️ أدخل ID صحيح بالأرقام فقط.")
+
+def process_transfer_amount(message):
+    chat_id = message.chat.id
+    try:
+        amount = float(message.text.strip())
+        if get_points(chat_id) < amount or amount <= 0:
+            bot.send_message(chat_id, "⚠️ رصيدك غير كافٍ أو المبلغ غير صحيح.")
+            return
+        target_id = transfer_cache.get(chat_id, {}).get('target_id')
+        update_points(chat_id, -amount)
+        update_points(target_id, amount * 0.95)
+        bot.send_message(chat_id, f"✅ **تم تحويل {amount} نقطة بنجاح.**", parse_mode="Markdown")
+        try:
+            bot.send_message(target_id, f"🎉 **وصلك تحويل نقاط بقيمة {amount * 0.95} نقطة من `{chat_id}`!**", parse_mode="Markdown")
+        except Exception:
+            pass
+    except ValueError:
+        bot.send_message(chat_id, "⚠️ أدخل أرقاماً صحيحة فقط.")
+
+def process_user_redeem_input(message):
+    chat_id = message.chat.id
+    raw_code = message.text.strip().upper()
+    
+    res = supabase.table("vouchers").select("amount").eq("code", raw_code).execute()
+    if res.data:
+        amt = res.data[0]['amount']
+        update_points(chat_id, amt, is_recharge=True)
+        supabase.table("vouchers").delete().eq("code", raw_code).execute()
+        bot.send_message(chat_id, f"🎉 **تم شحن {amt} نقطة برصيدك بنجاح!**", parse_mode="Markdown")
+        return
+
+    res_gift = supabase.table("gift_codes").select("*").eq("code", raw_code).execute()
+    if res_gift.data:
+        g = res_gift.data[0]
+        used_cnt = g.get('used_count', 0)
+        max_u = g.get('max_uses', 1)
+        
+        if used_cnt >= max_u:
+            bot.send_message(chat_id, "❌ **انتهت كمية استخدام هذا الكود!**", parse_mode="Markdown")
+            return
+            
+        res_used = supabase.table("gift_claims").select("*").eq("code", raw_code).eq("user_id", chat_id).execute()
+        if res_used.data:
+            bot.send_message(chat_id, "⚠️ **لقد قمت باستخدام هذا الكود مسبقاً!**", parse_mode="Markdown")
+            return
+
+        amt = float(g['points'])
+        update_points(chat_id, amt, is_recharge=True)
+        supabase.table("gift_codes").update({"used_count": used_cnt + 1}).eq("code", raw_code).execute()
+        supabase.table("gift_claims").insert({"code": raw_code, "user_id": chat_id}).execute()
+        
+        bot.send_message(chat_id, f"🎉 **مبروك! تم استبدال الكود وحصلت على ({amt}) نقطة بنجاح!**", parse_mode="Markdown")
+        return
+
+    bot.send_message(chat_id, "❌ الكود غير صحيح أو انتهت صلاحيته.")
+
+def process_user_asiacell_phone_for_charge(message):
+    chat_id = message.chat.id
+    phone_number = message.text.strip()
+    user_recharge_states.setdefault(chat_id, {})['asia_login_state'] = {'phone_number': phone_number}
+    try:
+        data_login = send_asia_login_request(phone_number)
+        if data_login.get("success") and "nextUrl" in data_login:
+            match = re.search(r'PID=([a-f0-9\-]+)', data_login["nextUrl"])
+            if not match:
+                bot.send_message(chat_id, "❌ لم يتم العثور على PID.")
+                return
+            pid = match.group(1)
+            user_recharge_states[chat_id]['asia_login_state']['pid'] = pid
+            msg = bot.send_message(chat_id, "💬 أدخل رمز التحقق SMS الذي وصلك:")
+            bot.register_next_step_handler(msg, process_user_asiacell_passcode_for_charge)
+        else:
+            bot.send_message(chat_id, f"❌ فشل إرسال الرقم: {data_login.get('message', data_login)}")
+    except Exception as e:
+        bot.send_message(chat_id, f"❌ خطأ: {e}")
+
+def process_user_asiacell_passcode_for_charge(message):
+    chat_id = message.chat.id
+    passcode = message.text.strip()
+    session = user_recharge_states.get(chat_id, {}).get('asia_login_state', {})
+    pid = session.get('pid')
+    phone_number = session.get('phone_number')
+    try:
+        data_verify = send_asia_sms_validation_request(pid, passcode)
+        if data_verify.get("success"):
+            user_recharge_states[chat_id]['verified_asia_phone'] = phone_number
+            bot.send_message(chat_id, "✅ تم تأكيد رقم هاتفك بنجاح.")
+            show_charge_amounts(chat_id)
+        else:
+            bot.send_message(chat_id, f"❌ رمز التحقق خاطئ: {data_verify.get('message', data_verify)}")
+    except Exception as e:
+        bot.send_message(chat_id, f"❌ خطأ: {e}")
+
+def show_charge_amounts(chat_id):
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    for amount in range(1, 11):
+        markup.add(types.InlineKeyboardButton(f"{amount}$", callback_data=f"select_charge_amount_{amount}", style=get_item_style(f"select_charge_amount_{amount}")))
+    bot.send_message(chat_id, "اختر مبلغ الشحنة المطلوب:", reply_markup=markup)
+
+def handle_select_charge_amount(call):
+    chat_id = call.message.chat.id
+    amount = float(call.data.split("_")[-1])
+    receiver_phone = user_recharge_states.get(chat_id, {}).get('verified_asia_phone')
+    
+    if not receiver_phone:
+        bot.send_message(chat_id, "❌ يرجى تأكيد رقم هاتفك أولاً.")
+        return
+    if not admin_asia_data['admin_asia_access_token']:
+        bot.send_message(chat_id, "❌ نظام الشحن التلقائي غير مفعل من قبل الإدارة حالياً.")
+        bot.send_message(ADMIN_ID, f"⚠️ المستخدم {chat_id} حاول الشحن بمبلغ {amount}$ ولكن رقم المالك (آسيا سيل) غير مسجل في البوت.")
+        return
+
+    try:
+        data_start = send_asia_credit_transfer_start_request(amount, receiver_phone, admin_asia_data['admin_asia_access_token'])
+        if data_start.get("success") or "PID" in data_start:
+            transfer_pid = data_start.get("PID")
+            if not transfer_pid and data_start.get("nextUrl"):
+                match = re.search(r'PID=([a-f0-9\-]+)', data_start["nextUrl"])
+                if match: transfer_pid = match.group(1)
+
+            admin_asia_data['pending_transfers'][chat_id] = {
+                'amount': amount,
+                'receiver_phone': receiver_phone,
+                'transfer_pid': transfer_pid,
+                'timestamp': datetime.now()
+            }
+            bot.send_message(chat_id, f"⏳ تم إرسال طلب شحن بمبلغ {amount}$. انتظر قليلاً ريثما تتم الموافقة.")
+            
+            markup_admin = types.InlineKeyboardMarkup()
+            markup_admin.add(types.InlineKeyboardButton("موافقة وتأكيد الشحن", callback_data=f"admin_approve_transfer_{chat_id}", style=get_item_style(f"admin_approve_transfer_{chat_id}")))
+            bot.send_message(ADMIN_ID, f"🔔 طلب شحن جديد من المستخدم `{chat_id}`\nالمبلغ: {amount}$\nالرقم: {receiver_phone}", reply_markup=markup_admin, parse_mode="Markdown")
+        else:
+            bot.send_message(chat_id, f"❌ فشل بدء التحويل: {data_start.get('message', data_start)}")
+    except Exception as e:
+        bot.send_message(chat_id, f"❌ خطأ فني: {e}")
+
+def admin_process_asiacell_phone(message):
+    if message.from_user.id != ADMIN_ID: return
+    phone = message.text.strip()
+    admin_asia_data['admin_asia_phone'] = phone
+    try:
+        data_login = send_asia_login_request(phone)
+        if data_login.get("success") and "nextUrl" in data_login:
+            match = re.search(r'PID=([a-f0-9\-]+)', data_login["nextUrl"])
+            pid = match.group(1)
+            admin_asia_data['admin_asia_pid'] = pid
+            msg = bot.send_message(ADMIN_ID, "💬 أرسل رمز التحقق (SMS) الذي وصل لرقم المالك:")
+            bot.register_next_step_handler(msg, admin_process_asiacell_passcode)
+        else:
+            bot.send_message(ADMIN_ID, f"❌ فشل إرسال الرقم.")
+    except Exception as e:
+        bot.send_message(ADMIN_ID, f"❌ خطأ: {e}")
+
+def admin_process_asiacell_passcode(message):
+    if message.from_user.id != ADMIN_ID: return
+    passcode = message.text.strip()
+    pid = admin_asia_data.get('admin_asia_pid')
+    try:
+        data_verify = send_asia_sms_validation_request(pid, passcode)
+        if data_verify.get("success"):
+            admin_asia_data['admin_asia_access_token'] = data_verify["access_token"]
+            admin_asia_data['admin_asia_pid'] = None
+            bot.send_message(ADMIN_ID, "✅ تم تسجيل رقم المالك بنجاح وحفظ التوكن.")
+        else:
+            bot.send_message(ADMIN_ID, f"❌ رمز التحقق خاطئ.")
+    except Exception as e:
+        bot.send_message(ADMIN_ID, f"❌ خطأ: {e}")
+
+def admin_view_pending_transfers_func(chat_id):
+    if not admin_asia_data['pending_transfers']:
+        bot.send_message(chat_id, "🟢 لا توجد طلبات شحن معلقة حالياً.")
+        return
+    for uid, info in admin_asia_data['pending_transfers'].items():
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("تأكيد الشحن", callback_data=f"admin_approve_transfer_{uid}", style=get_item_style(f"admin_approve_transfer_{uid}")))
+        bot.send_message(chat_id, f"👤 المستخدم: {uid}\n💰 المبلغ: {info['amount']}$\n📱 الرقم: {info['receiver_phone']}", reply_markup=markup)
+
+def admin_data_transfer_approval(chat_id, target_user_id):
+    admin_asia_data['current_transfer_target_user'] = target_user_id
+    msg = bot.send_message(chat_id, "💬 أدخل رمز التحويل (SMS) الذي وصل لرقمك المالك لتأكيد العملية:")
+    bot.register_next_step_handler(msg, admin_process_transfer_passcode_final)
+
+def admin_process_transfer_passcode_final(message):
+    if message.from_user.id != ADMIN_ID: return
+    passcode = message.text.strip()
+    target_user_id = admin_asia_data.get('current_transfer_target_user')
+    transfer_info = admin_asia_data['pending_transfers'].get(target_user_id)
+
+    if not transfer_info:
+        bot.send_message(ADMIN_ID, "❌ الطلب غير موجود.")
+        return
+
+    try:
+        data_confirm = send_asia_credit_transfer_confirm_request(
+            transfer_info['transfer_pid'],
+            passcode,
+            admin_asia_data['admin_asia_access_token']
+        )
+        if data_confirm.get("success"):
+            update_points(target_user_id, transfer_info['amount'], is_recharge=True)
+            bot.send_message(ADMIN_ID, f"✅ تم تحويل الرصيد وإضافة {transfer_info['amount']} نقطة للمستخدم {target_user_id} بنجاح!")
+            bot.send_message(target_user_id, f"🎉 تم شحن رصيدك بنجاح بمبلغ {transfer_info['amount']}$!")
+            del admin_asia_data['pending_transfers'][target_user_id]
+        else:
+            bot.send_message(ADMIN_ID, f"❌ فشل التأكيد: {data_confirm.get('message', data_confirm)}")
+    except Exception as e:
+        bot.send_message(ADMIN_ID, f"❌ خطأ فني: {e}")
+
+@bot.message_handler(commands=['start', 'redeem', 'admin'])
+def handle_commands(message):
+    chat_id = message.chat.id
+    text = message.text
+
+    if is_banned(chat_id):
+        return
+
+    if text.startswith('/start'):
+        args = text.split()
+        param = args[1] if len(args) > 1 else None
+        
+        if param and param.startswith('CARD-'):
+            message.text = param
+            process_user_redeem_input(message)
+            return
+
+        referrer_id = param if param and param != str(chat_id) and param.isdigit() else None
+        
+        try:
+            first_name = message.from_user.first_name or "بدون اسم"
+            username = message.from_user.username or "لا يوجد"
+            register_user_if_new(chat_id, first_name, username, referrer_id)
+        except Exception as e:
+            print(f"Error registering user in handler: {e}")
+
+        if chat_id != ADMIN_ID:
+            try:
+                if not check_sub(chat_id):
+                    markup = types.InlineKeyboardMarkup()
+                    for i in range(len(CHANNELS)):
+                        markup.add(types.InlineKeyboardButton("اشترك في القناة 📢", url=CHANNEL_LINKS[i], style=get_item_style(CHANNEL_LINKS[i])))
+                    markup.add(types.InlineKeyboardButton("تحققت من الاشتراك ✅", callback_data='start', style=get_item_style('start')))
+                    bot.send_message(chat_id, "عذراً، يجب عليك الاشتراك في القناة أولاً لتتمكن من استخدام البوت:", reply_markup=markup)
+                    return
+            except Exception as e:
+                print(f"Error checking subscription: {e}")
+
+        main_menu(chat_id)
+
+    elif text.startswith('/admin') and chat_id == ADMIN_ID:
+        admin_panel_shortcut(chat_id)
+
+if __name__ == '__main__':
+    print("Bot is running...")
+    bot.infinity_polling(skip_pending=True)
