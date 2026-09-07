@@ -967,12 +967,7 @@ def main_menu(chat_id, message_id=None):
     )
     markup.add(
         types.InlineKeyboardButton("🎟️ إدخال كود شحن / هدية", callback_data="enter_voucher_code", style=get_item_style("enter_voucher_code"))
-    )
-    
-    # زر طلبات أنجزناها الجديد باللون الأخضر
-    markup.add(
-        types.InlineKeyboardButton(f"🛡️ طلبات أنجزناها {total_orders_count} طلب", callback_data="completed_orders_info", style=get_item_style("completed_orders_info"))
-    )
+    )    
 
     markup.add(
         types.InlineKeyboardButton("💳 شحن رصيد آسيا سيل (مباشر)", callback_data="asiacell_recharge_menu", style=get_item_style("asiacell_recharge_menu")),
@@ -983,7 +978,10 @@ def main_menu(chat_id, message_id=None):
         markup.add(
             types.InlineKeyboardButton("👨‍💻 الدعم الفني", url=SUPPORT_LINK, style=get_item_style("support_btn"))
         )
-        
+
+    markup.add(
+        types.InlineKeyboardButton(f"🛡️ طلبات أنجزناها {total_orders_count} طلب", callback_data="completed_orders_info", style=get_item_style("completed_orders_info"))
+    )                
     if chat_id == ADMIN_ID:
         markup.add(types.InlineKeyboardButton("⚙️ لوحة الإدارة", callback_data="admin_panel", style=get_item_style("admin_panel")))
 
