@@ -306,7 +306,7 @@ def validate_service_link(service_category, link):
     if service_category == 'cat_telegram':
         if 't.me/' in link_lower or link_lower.startswith('@') or len(link.strip()) >= 3:
             return True, "صالح"
-        return False, "❌ عذراً، يرجى إرسال معرف قناة صحيح (يبدأ بـ @) أو رابط صحيح."
+        return False, "❌ عذراً، يرجى إرسال معرف قناة أو كفر صحيح (يبدأ بـ @ أو رابط تليجرام)."
 
     if not link.startswith('http') and service_category != 'cat_games':
         return False, "⚠️ الرابط المدخل غير صحيح! يجب أن يبدأ الرابط بـ https://"
@@ -1216,7 +1216,6 @@ def query(call):
                 bot.register_next_step_handler(call.message, step_subcat_name)
                 return
 
-        # تم ضبط المسافات هنا لتكون صحيحة 100%
         elif data == 'completed_orders_info':
             total_cnt = get_total_completed_orders_count()
             bot.answer_callback_query(
@@ -1894,7 +1893,7 @@ def query(call):
                     cat_to_del = data.replace('delcat_', '', 1).strip()
                     if cat_to_del in CATEGORIES:
                         cat_name = CATEGORIES[cat_to_del]
-                        keys_to_del = [k for k, v in SERVICES.items() if v.get('category') == cat_to_del]
+                        keys_to_del = [k for k, v in SERVICES.items() if v.get('category'] == cat_to_del]
 
                         for k in keys_to_del:
                             if k in SERVICES:
@@ -2544,7 +2543,7 @@ def query(call):
                     bot.send_message(chat_id, text_menu, reply_markup=markup, parse_mode="Markdown")
                 return
 
-            if srv_data_item.get('category') in ['cat_itunes', 'cat_esim'] or srv_data_item.get('service_id') == 0:
+            if srv_data_item.get('category') in ['cat_itunes', 'cat_esim'] or (srv_data_item.get('service_id') == 0 and srv_data_item.get('category') != 'cat_games'):
                 final_price = get_service_price(chat_id, srv_data_item.get('price', 1.0))
                 
                 pending_orders_cache[chat_id] = {
@@ -2580,10 +2579,30 @@ def query(call):
             final_price = get_service_price(chat_id, base_price)
             api_qty = srv_data_item.get('qty', 1000)
 
+            # تحديد الرسالة المناسبة لكل قسم وحسب نوع الخدمة
+            srv_cat = srv_data_item.get('category', '')
+            srv_name_lower = srv_data_item.get('name', '').lower()
+            
+            if srv_cat == 'cat_games':
+                prompt_text = srv_data_item.get('msg', '🎮 **أرسل الآيدي المطلوب (Player ID):**')
+            elif srv_cat == 'cat_telegram':
+                prompt_text = "✈️ **أرسل رابط القناة أو الكروب (أو المعرف يبدأ بـ @):**"
+            elif srv_cat == 'cat_insta':
+                if 'لايك' in srv_name_lower:
+                    prompt_text = "❤️ **أرسل رابط البوست الخاص بك في الانستغرام:**"
+                elif 'مشارك' in srv_name_lower or 'share' in srv_name_lower:
+                    prompt_text = "✈️ **أرسل رابط البوست أو المنشور الخاص بالمشاركات:**"
+                elif 'مشاهد' in srv_name_lower or 'view' in srv_name_lower:
+                    prompt_text = "👁️ **أرسل رابط الفيديو أو الريلز الخاص بالمشاهدات:**"
+                else:
+                    prompt_text = "📸 **أرسل رابط حسابك أو معرف الانستغرام (رابط البروفایل):**"
+            else:
+                prompt_text = srv_data_item.get('msg', '🔗 **أرسل الرابط أو المعرف المطلوب الآن:**')
+
             text_req = (
                 f"📦 **{srv_data_item['name']}**\n"
                 f"━━━━━━━━━━━━━━━━━━━\n\n"
-                f"🔗 أرسل الرابط أو المعرف المطلوب الآن:\n"
+                f"{prompt_text}\n"
                 f"*(السعر: {final_price} نقطة)*"
             )
             
@@ -2615,7 +2634,26 @@ def query(call):
                         final_price = get_service_price(chat_id, float(selected_tier['price']))
                         api_qty_to_send = int(selected_tier['api_qty'])
                         
-                        text_req = f"🔗 أرسل الرابط أو المعرف المطلوب الآن:\n*(الكمية المختارة: {target_qty} - السعر: {final_price} نقطة)*"
+                        srv_cat = s_data.get('category', '')
+                        srv_name_lower = s_data.get('name', '').lower()
+                        
+                        if srv_cat == 'cat_games':
+                            prompt_text = s_data.get('msg', '🎮 **أرسل الآيدي المطلوبة (Player ID):**')
+                        elif srv_cat == 'cat_telegram':
+                            prompt_text = "✈️ **أرسل رابط القناة أو الكروب (أو المعرف يبدأ بـ @):**"
+                        elif srv_cat == 'cat_insta':
+                            if 'لايك' in srv_name_lower:
+                                prompt_text = "❤️ **أرسل رابط البوست الخاص بك في الانستغرام:**"
+                            elif 'مشارك' in srv_name_lower or 'share' in srv_name_lower:
+                                prompt_text = "✈️ **أرسل رابط البوست أو المنشور الخاص بالمشاركات:**"
+                            elif 'مشاهد' in srv_name_lower or 'view' in srv_name_lower:
+                                prompt_text = "👁️ **أرسل رابط الفيديو أو الريلز الخاص بالمشاهدات:**"
+                            else:
+                                prompt_text = "📸 **أرسل رابط حسابك أو معرف الانستغرام (رابط البروفايل):**"
+                        else:
+                            prompt_text = "🔗 **أرسل الرابط أو المعرف المطلوب الآن:**"
+
+                        text_req = f"{prompt_text}\n*(الكمية المختارة: {target_qty} - السعر: {final_price} نقطة)*"
                         markup_back = types.InlineKeyboardMarkup()
                         markup_back.add(types.InlineKeyboardButton("🔙 رجوع", callback_data=srv_key, style=get_item_style(srv_key)))
                         
@@ -3101,8 +3139,26 @@ def process_generic_custom_qty(message, base_service_key):
         cost_for_qty = (qty / 1000.0) * price_per_1000
         final_price = get_service_price(chat_id, cost_for_qty)
 
-        msg_prompt = "🔗 أرسل الرابط أو المعرف المطلوب الآن:"
-        msg = bot.send_message(chat_id, f"{msg_prompt}\n(السعر النهائي لـ {qty} وحدة: {final_price} نقطة)", reply_markup=markup_back)
+        # تخصيص رسالة طلب الرابط بناءً على القسم عند إدخال الكمية يدوياً
+        srv_cat = service_data.get('category', '')
+        srv_name_lower = service_data.get('name', '').lower()
+        if srv_cat == 'cat_games':
+            msg_prompt = service_data.get('msg', '🎮 **أرسل الآيدي المطلوبة (Player ID):**')
+        elif srv_cat == 'cat_telegram':
+            msg_prompt = "✈️ **أرسل رابط القناة أو الكروب (أو المعرف يبدأ بـ @):**"
+        elif srv_cat == 'cat_insta':
+            if 'لايك' in srv_name_lower:
+                msg_prompt = "❤️ **أرسل رابط البوست الخاص بك في الانستغرام:**"
+            elif 'مشارك' in srv_name_lower or 'share' in srv_name_lower:
+                msg_prompt = "✈️ **أرسل رابط البوست أو المنشور الخاص بالمشاركات:**"
+            elif 'مشاهد' in srv_name_lower or 'view' in srv_name_lower:
+                msg_prompt = "👁️ **أرسل رابط الفيديو أو الريلز الخاص بالمشاهدات:**"
+            else:
+                msg_prompt = "📸 **أرسل رابط حسابك أو معرف الانستغرام (رابط البروفايل):**"
+        else:
+            msg_prompt = "🔗 **أرسل الرابط أو المعرف المطلوب الآن:**"
+
+        msg = bot.send_message(chat_id, f"{msg_prompt}\n(السعر النهائي لـ {qty} وحدة: {final_price} نقطة)", reply_markup=markup_back, parse_mode="Markdown")
         bot.register_next_step_handler(msg, prepare_order_summary, final_price, service_data['service_id'], qty, f"{service_data['name']} ({qty})")
 
     except ValueError:
