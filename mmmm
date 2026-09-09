@@ -491,6 +491,20 @@ def ranks_and_giveaways_menu(chat_id, message_id):
     except Exception:
         bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
 
+def support_and_agents_menu(chat_id, message_id):
+    """واجهة فرعية للاختيار بين الدعم الفني أو وكلاء الشحن المعتمدين"""
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        types.InlineKeyboardButton("👨‍💻 تواصل مع الدعم الفني", url=SUPPORT_LINK, style=get_item_style("support_btn")),
+        types.InlineKeyboardButton("💰 وكلاء الشحن المعتمدين", url=SUPPORT_LINK, style=get_item_style("agents_btn")),
+        types.InlineKeyboardButton("🔙 العودة للقائمة الرئيسية", callback_data="start", style=get_item_style("start"))
+    )
+    text = "🛠️ **قسم الدعم ووكلاء الشحن المعتمدين:**\n\nاختر الجهة التي ترغب بالتواصل معها:"
+    try:
+        bot.edit_message_text(text, chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+    except Exception:
+        bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+
 def promote_user_to_reseller(admin_id, target_uid):
     if admin_id != ADMIN_ID:
         return
@@ -991,7 +1005,7 @@ def main_menu(chat_id, message_id=None):
 
     total_orders_count = get_total_completed_orders_count()
 
-    # القائمة الرئيسية المحدثة مع الأزرار المدمجة الجديدة
+    # القائمة الرئيسية المحدثة (زر الدعم والوكلاء يفتح الآن القائمة الفرعية عبر callback_data)
     markup = types.InlineKeyboardMarkup(row_width=2)
     
     if not is_item_in_maintenance('our_services') or chat_id == ADMIN_ID:
@@ -1016,7 +1030,7 @@ def main_menu(chat_id, message_id=None):
     
     if not is_item_in_maintenance('support_btn') or chat_id == ADMIN_ID:
         markup.add(
-            types.InlineKeyboardButton("👨‍💻 الدعم ووكلاء الشحن المعتمدين", url=SUPPORT_LINK, style=get_item_style("support_and_agents"))
+            types.InlineKeyboardButton("👨‍💻 الدعم ووكلاء الشحن المعتمدين", callback_data="menu_support_agents", style=get_item_style("support_and_agents"))
         )
 
     # زر "طلبات أنجزناها" مثبت في مكانه تماماً وبنفس الستايل الأخضر
@@ -1096,6 +1110,9 @@ def query(call):
             return
         elif data == 'menu_daily_gift':
             daily_and_gift_menu(chat_id, message_id)
+            return
+        elif data == 'menu_support_agents':
+            support_and_agents_menu(chat_id, message_id)
             return
 
         if chat_id == ADMIN_ID:
@@ -2336,7 +2353,7 @@ def query(call):
             markup = types.InlineKeyboardMarkup(row_width=1)
             for g in giveaways:
                 markup.add(types.InlineKeyboardButton(f"🎁 {g['title']} ({g['prize_points']} نقطة)", callback_data=f"enter_gw_{g['id']}", style=get_item_style(f"enter_gw_{g['id']}")))
-            markup.add(types.InlineKeyboardButton("🔙 العودة للقائمة", callback_data='start', style=get_item_style('start')))
+            markup.add(types.InlineKeyboardButton("🔙 العودة للقائمة", callback_data='menu_ranks_giveaways', style=get_item_style('menu_ranks_giveaways')))
             bot.edit_message_text("🏆 **اختر المسابقة للدخول والسحب العشوائي:**", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
 
         elif data.startswith('enter_gw_'):
@@ -2583,7 +2600,7 @@ def query(call):
                 markup.add(types.InlineKeyboardButton("✍️ اختيار العدد بنفسك (يدوي)", callback_data=f"custom_{srv_key}", style=get_item_style(f"custom_{srv_key}")))
                 markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='our_services', style=get_item_style('our_services')))
                 
-                custom_desc = srv_data_item.get('msg', 'اختر الكمية المطلوبة من الأزرار أدناه أو أدخلها يدوياً:')
+                custom_desc = srv_data_item.get('msg', 'اختر الكمية المطلوبة من الأزرار أدناه أو أدخلها يدوياًة:')
                 text_menu = f"📦 **{srv_data_item['name']}**\n━━━━━━━━━━━━━━━━━━━\n\n{custom_desc}\n\nاختر الكمية المطلوبة:"
                 try:
                     bot.edit_message_text(text_menu, chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
@@ -3574,7 +3591,7 @@ def handle_commands(message):
 
         if chat_id != ADMIN_ID:
             try:
-                if not check_sub(chat_id):
+                ifالقائمةeck_sub(chat_id):
                     markup = types.InlineKeyboardMarkup()
                     for i in range(len(CHANNELS)):
                         markup.add(types.InlineKeyboardButton("اشترك في القناة 📢", url=CHANNEL_LINKS[i], style=get_item_style(CHANNEL_LINKS[i])))
