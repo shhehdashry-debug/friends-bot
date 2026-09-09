@@ -83,12 +83,9 @@ http_session.headers.update({
 # دالة الألوان الموحدة (أخضر لجميع الأزرار، أحمر للأزرار المحددة)
 # ==========================================
 def get_item_style(item_key):
-    # الأزرار باللون الأحمر حصراً حسب الطلب
-    red_buttons = ['asiacell_recharge_menu', 'support_btn', 'agents_btn']
+    red_buttons = ['asiacell_recharge_menu', 'support_btn', 'agents_btn', 'support_and_agents']
     if item_key in red_buttons or item_key == SUPPORT_LINK:
         return "danger"
-    
-    # بقية الأزرار والخدمات والأقسام باللون الأخضر
     return "success"
 
 def get_asia_headers(access_token=None):
@@ -306,7 +303,7 @@ def validate_service_link(service_category, link):
     if service_category == 'cat_telegram':
         if 't.me/' in link_lower or link_lower.startswith('@') or len(link.strip()) >= 3:
             return True, "صالح"
-        return False, "❌ عذراً، يرجى إرسال معرف قناة أو كفر صحيح (يبدأ بـ @ أو رابط تليجرام)."
+        return False, "❌ عذراً، يرجى إرسال معرف قناة أو كروب صحيح (يبدأ بـ @ أو رابط تليجرام)."
 
     if not link.startswith('http') and service_category != 'cat_games':
         return False, "⚠️ الرابط المدخل غير صحيح! يجب أن يبدأ الرابط بـ https://"
@@ -445,7 +442,7 @@ def get_service_price(user_id, base_price):
     return round(base_price * (1 - discount), 2)
 
 # ==========================================
-# أضف دالة التخفيضات التلقائية هنا تحت دالة get_service_price مباشرة:
+# دالة التخفيضات التلقائية للكميات الكبيرة
 # ==========================================
 def calculate_bulk_discount_price(base_rate_per_1000, quantity):
     """
@@ -965,6 +962,7 @@ def main_menu(chat_id, message_id=None):
 
     total_orders_count = get_total_completed_orders_count()
 
+    # القائمة الرئيسية المحدثة مع اختصار الأزرار وترتيبها بشكل منظم
     markup = types.InlineKeyboardMarkup(row_width=2)
     
     if not is_item_in_maintenance('our_services') or chat_id == ADMIN_ID:
@@ -975,31 +973,25 @@ def main_menu(chat_id, message_id=None):
         types.InlineKeyboardButton(cart_btn_text, callback_data="view_my_cart", style=get_item_style("view_my_cart"))
     )
     markup.add(
-        types.InlineKeyboardButton("🎯 المسابقات والسحوبات", callback_data="active_giveaways", style=get_item_style("active_giveaways")),
-        types.InlineKeyboardButton("🔄 تحويل نقاط", callback_data="transfer_points", style=get_item_style("transfer_points"))
+        types.InlineKeyboardButton("🏆 المسابقات والرتب والخصومات", callback_data="ranks_info", style=get_item_style("ranks_info")),
+        types.InlineKeyboardButton("🎁 الهدايا والكودات اليومية", callback_data="daily_reward", style=get_item_style("daily_reward"))
     )
     markup.add(
-        types.InlineKeyboardButton("🎖️ نظام الرتب والوكلاء", callback_data="ranks_info", style=get_item_style("ranks_info")),
+        types.InlineKeyboardButton("🔄 تحويل نقاط", callback_data="transfer_points", style=get_item_style("transfer_points")),
         types.InlineKeyboardButton("👥 دعوة الأصدقاء", callback_data="referral_menu", style=get_item_style("referral_menu"))
     )
     markup.add(
-        types.InlineKeyboardButton("🎁 مكافأة يومية", callback_data="daily_reward", style=get_item_style("daily_reward")),
-        types.InlineKeyboardButton("📦 طلباتي والتتبع الذكي", callback_data="my_orders", style=get_item_style("my_orders"))
+        types.InlineKeyboardButton("📦 طلباتي والتتبع الذكي", callback_data="my_orders", style=get_item_style("my_orders")),
+        types.InlineKeyboardButton("💳 شحن رصيد آسيا سيل (مباشر)", callback_data="asiacell_recharge_menu", style=get_item_style("asiacell_recharge_menu"))
     )
-    markup.add(
-        types.InlineKeyboardButton("🎟️ إدخال كود شحن / هدية", callback_data="enter_voucher_code", style=get_item_style("enter_voucher_code"))
-    )    
-
-    markup.add(
-        types.InlineKeyboardButton("💳 شحن رصيد آسيا سيل (مباشر)", callback_data="asiacell_recharge_menu", style=get_item_style("asiacell_recharge_menu")),
-        types.InlineKeyboardButton("💰 وكلاء شحن", url=SUPPORT_LINK, style=get_item_style("agents_btn"))
-    )
-
+    
+    # دمج الدعم الفني والوكلاء في زر واحد ملون بالأحمر
     if not is_item_in_maintenance('support_btn') or chat_id == ADMIN_ID:
         markup.add(
-            types.InlineKeyboardButton("👨‍💻 الدعم الفني", url=SUPPORT_LINK, style=get_item_style("support_btn"))
+            types.InlineKeyboardButton("👨‍💻 الدعم ووكلاء الشحن المعتمدين", url=SUPPORT_LINK, style=get_item_style("support_and_agents"))
         )
 
+    # زر "طلبات أنجزناها" مثبت في مكانه تماماً وبنفس الستايل الأخضر
     markup.add(
         types.InlineKeyboardButton(f"🛡️ طلبات أنجزناها {total_orders_count} طلب", callback_data="completed_orders_info", style=get_item_style("completed_orders_info"))
     )                
@@ -2073,7 +2065,6 @@ def query(call):
             handle_select_charge_amount(call)
             return
 
-        # زر خدماتنا الرئيسي الذي يعرض الأقسام (انستغرام، تلجرام، آيتونز، شرائح eSIM، وشحن الألعاب)
         elif data == 'our_services':
             if is_item_in_maintenance('our_services') and chat_id != ADMIN_ID:
                 bot.send_message(chat_id, "🛠️ هذا القسم قيد الصيانة حالياً.")
@@ -2600,7 +2591,6 @@ def query(call):
             final_price = get_service_price(chat_id, base_price)
             api_qty = srv_data_item.get('qty', 1000)
 
-            # تحديد الرسالة المناسبة لكل قسم وحسب نوع الخدمة
             srv_cat = srv_data_item.get('category', '')
             srv_name_lower = srv_data_item.get('name', '').lower()
             
@@ -2616,7 +2606,7 @@ def query(call):
                 elif 'مشاهد' in srv_name_lower or 'view' in srv_name_lower:
                     prompt_text = "👁️ **أرسل رابط الفيديو أو الريلز الخاص بالمشاهدات:**"
                 else:
-                    prompt_text = "📸 **أرسل رابط حسابك أو معرف الانستغرام (رابط البروفایل):**"
+                    prompt_text = "📸 **أرسل رابط حسابك أو معرف الانستغرام (رابط البروفايل):**"
             else:
                 prompt_text = srv_data_item.get('msg', '🔗 **أرسل الرابط أو المعرف المطلوب الآن:**')
 
@@ -3160,7 +3150,6 @@ def process_generic_custom_qty(message, base_service_key):
         cost_for_qty = (qty / 1000.0) * price_per_1000
         final_price = get_service_price(chat_id, cost_for_qty)
 
-        # تخصيص رسالة طلب الرابط بناءً على القسم عند إدخال الكمية يدوياً
         srv_cat = service_data.get('category', '')
         srv_name_lower = service_data.get('name', '').lower()
         if srv_cat == 'cat_games':
