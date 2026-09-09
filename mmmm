@@ -1005,7 +1005,6 @@ def main_menu(chat_id, message_id=None):
 
     total_orders_count = get_total_completed_orders_count()
 
-    # القائمة الرئيسية المحدثة (زر الدعم والوكلاء يفتح الآن القائمة الفرعية عبر callback_data)
     markup = types.InlineKeyboardMarkup(row_width=2)
     
     if not is_item_in_maintenance('our_services') or chat_id == ADMIN_ID:
@@ -1014,6 +1013,11 @@ def main_menu(chat_id, message_id=None):
     markup.add(
         types.InlineKeyboardButton("🔥 الأكثر طلباً", callback_data="top_services", style=get_item_style("top_services")),
         types.InlineKeyboardButton(cart_btn_text, callback_data="view_my_cart", style=get_item_style("view_my_cart"))
+    )
+    # إضافة زر حسابي بجانب السلة أو في مكان بارز
+    markup.add(
+        types.InlineKeyboardButton("👤 حسابي وإحصائياتي", callback_data="my_account_info", style=get_item_style("my_account_info")),
+        types.InlineKeyboardButton("📦 طلباتي والتتبع الذكي", callback_data="my_orders", style=get_item_style("my_orders"))
     )
     markup.add(
         types.InlineKeyboardButton("🏆 المسابقات والرتب والخصومات", callback_data="menu_ranks_giveaways", style=get_item_style("menu_ranks_giveaways")),
@@ -1024,7 +1028,6 @@ def main_menu(chat_id, message_id=None):
         types.InlineKeyboardButton("👥 دعوة الأصدقاء", callback_data="referral_menu", style=get_item_style("referral_menu"))
     )
     markup.add(
-        types.InlineKeyboardButton("📦 طلباتي والتتبع الذكي", callback_data="my_orders", style=get_item_style("my_orders")),
         types.InlineKeyboardButton("💳 شحن رصيد آسيا سيل (مباشر)", callback_data="asiacell_recharge_menu", style=get_item_style("asiacell_recharge_menu"))
     )
     
@@ -1033,16 +1036,17 @@ def main_menu(chat_id, message_id=None):
             types.InlineKeyboardButton("👨‍💻 الدعم ووكلاء الشحن المعتمدين", callback_data="menu_support_agents", style=get_item_style("support_and_agents"))
         )
 
-    # زر "طلبات أنجزناها" مثبت في مكانه تماماً وبنفس الستايل الأخضر
     markup.add(
         types.InlineKeyboardButton(f"🛡️ طلبات أنجزناها {total_orders_count} طلب", callback_data="completed_orders_info", style=get_item_style("completed_orders_info"))
     )                
     if chat_id == ADMIN_ID:
         markup.add(types.InlineKeyboardButton("⚙️ لوحة الإدارة", callback_data="admin_panel", style=get_item_style("admin_panel")))
 
+    # تم إضافة الآيدي في أول سطر مع النقاط
     text = (
-        f"نورت بوت المهاجم اولوياتنا رضا زبون 🌟\n\n"
-        f"💰 رصيدك: <b>{points}</b> نقطة\n"
+        f"🆔 آيدي المستخدم: <code>{chat_id}</code>\n"
+        f"💰 رصيدك: <b>{points}</b> نقطة\n\n"
+        f"نورت بوت المهاجم اولوياتنا رضا زبون 🌟\n"
         f"🎖️ رتبتك الخدمات: <b>{status_text}</b>\n\n"
         f"اختر القسم أو الخدمة المطلوبة:"
     )
@@ -1055,6 +1059,75 @@ def main_menu(chat_id, message_id=None):
     else:
         bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML")
 
+
+def show_user_account_info(chat_id, message_id):
+    """عرض معلومات الحساب المفصلة: تاريخ الشحن، وتاريخ وأسماء تفاصيل الطلبات السابقة"""
+    u = get_user(chat_id)
+    if not u:
+        try:
+            bot.answer_callback_query(call.id, "❌ لم يتم العثور على بيانات الحساب.", show_alert=True)
+        except Exception:
+            pass
+        return
+
+    total_recharged = u.get('total_recharged', 0.0) or 0.0
+    total_spent = u.get('total_spent', 0.0) or 0.0
+    points = u.get('points', 0.0) or 0.0
+    level_info = get_user_level(chat_id)
+    
+    # تنسيق تاريخ آخر شحن أو إنشاء حساب إذا وجد (أو عرض الوقت الحالي/المسجل)
+    # ملاحظة: يمكنك اعتماد عمود 'last_order_ts' أو الوقت الحالي كمرجع
+    last_recharge_date = "متوفر بالسجل"
+
+    # جلب كافة طلبات المستخدم مع تفاصيل تاريخ الشراء واسم الطلبية وحالتها
+    orders_text = ""
+    try:
+        res_orders = supabase.table("user_orders").select("*").eq("user_id", chat_id).order("order_id", desc=True).limit(15).execute()
+        orders = res_orders.data if res_orders.data else []
+        
+        if orders:
+            orders_text = "\n📋 **سجل العمليات والطلبات السابقة:**\n━━━━━━━━━━━━━━━━━━━\n"
+            for o in orders:
+                s_name = str(o.get('service', 'خدمة')).replace('<', '&lt;').replace('>', '&gt;')
+                status = o.get('status', 'قيد التنفيذ')
+                price = o.get('price', 0)
+                oid = o.get('order_id', 0)
+                ts = o.get('created_at_ts', 0)
+                
+                # تحويل الـ Timestamp إلى تاريخ قراءة بشري
+                if ts:
+                    date_str = datetime.fromtimestamp(ts).strftime('%Y-%m-%d | %H:%M')
+                else:
+                    date_str = "غير محدد"
+                    
+                icon = "⏳" if "قيد" in str(status) else ("❌" if "ملغي" in str(status) else "✅")
+                orders_text += f"🆔 `#{oid}` | 📅 {date_str}\n📦 **الطلب:** {s_name}\n💰 **السعر:** {price} نقطة | {icon} {status}\n───────────────────\n"
+        else:
+            orders_text = "\n📋 **ليس لديك أي طلبات سابقة حتى الآن.**"
+    except Exception as e:
+        print(f"Error fetching orders for account info: {e}")
+        orders_text = "\n📋 تعذر جلب سجل الطلبات حالياً."
+
+    text = (
+        f"👤 **الملف الشخصي وإحصائيات حسابك:**\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"🆔 الآيدي: `{chat_id}`\n"
+        f"🎖️ الرتبة: **{level_info['title']}**\n"
+        f"💰 الرصيد الحالي: `{points}` نقطة\n"
+        f"💳 إجمالي ما شحنته: `{total_recharged}` نقطة\n"
+        f"🛍️ إجمالي ما صرفته: `{total_spent}` نقطة\n"
+        f"{orders_text}"
+    )
+
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        types.InlineKeyboardButton("🔙 العودة للقائمة الرئيسية", callback_data="start", style=get_item_style("start"))
+    )
+
+    try:
+        bot.edit_message_text(text, chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+    except Exception:
+        bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
 
 def update_menu_safely(bot_inst, chat_id, message_id, menu_key, markup_kb):
     text_to_show = get_menu_description(menu_key, "")
@@ -1111,6 +1184,11 @@ def query(call):
         elif data == 'menu_daily_gift':
             daily_and_gift_menu(chat_id, message_id)
             return
+   
+        elif data == 'my_account_info':
+            show_user_account_info(chat_id, message_id)
+            return
+   
         elif data == 'menu_support_agents':
             support_and_agents_menu(chat_id, message_id)
             return
