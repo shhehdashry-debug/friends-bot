@@ -1016,7 +1016,7 @@ def main_menu(chat_id, message_id=None):
     )
     # إضافة زر حسابي بجانب السلة أو في مكان بارز
     markup.add(
-        types.InlineKeyboardButton("👤 حسابي وإحصائياتي", callback_data="my_account_info", style=get_item_style("my_account_info")),
+        types.InlineKeyboardButton("👤 حسابي ", callback_data="my_account_info", style=get_item_style("my_account_info")),
         types.InlineKeyboardButton("📦 طلباتي والتتبع الذكي", callback_data="my_orders", style=get_item_style("my_orders"))
     )
     markup.add(
@@ -1109,8 +1109,6 @@ def show_user_account_info(chat_id, message_id):
         orders_text = "\n📋 تعذر جلب سجل الطلبات حالياً."
 
     text = (
-        f"👤 **الملف الشخصي وإحصائيات حسابك:**\n"
-        f"━━━━━━━━━━━━━━━━━━━\n"
         f"🆔 الآيدي: `{chat_id}`\n"
         f"🎖️ الرتبة: **{level_info['title']}**\n"
         f"💰 الرصيد الحالي: `{points}` نقطة\n"
