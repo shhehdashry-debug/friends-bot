@@ -462,6 +462,35 @@ def calculate_bulk_discount_price(base_rate_per_1000, quantity):
     total_price = (quantity / 1000.0) * price_per_1k * discount_multiplier
     return round(total_price, 2)
 
+# ==========================================
+# الواجهات الفرعية المدمجة للأزرار المختصرة
+# ==========================================
+def daily_and_gift_menu(chat_id, message_id):
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        types.InlineKeyboardButton("🎁 استلام المكافأة اليومية", callback_data="daily_reward", style=get_item_style("daily_reward")),
+        types.InlineKeyboardButton("🎟️ إدخال كود شحن / هدية", callback_data="enter_voucher_code", style=get_item_style("enter_voucher_code")),
+        types.InlineKeyboardButton("🔙 العودة للقائمة الرئيسية", callback_data="start", style=get_item_style("start"))
+    )
+    text = "🎁 **قسم الهدايا والكودات اليومية:**\n\nاختر الخدمة المطلوبة من الأزرار أدناه:"
+    try:
+        bot.edit_message_text(text, chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+    except Exception:
+        bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+
+def ranks_and_giveaways_menu(chat_id, message_id):
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        types.InlineKeyboardButton("🎯 المسابقات والسحوبات النشطة", callback_data="active_giveaways", style=get_item_style("active_giveaways")),
+        types.InlineKeyboardButton("🎖️ نظام الرتب والتخفيضات", callback_data="ranks_info", style=get_item_style("ranks_info")),
+        types.InlineKeyboardButton("🔙 العودة للقائمة الرئيسية", callback_data="start", style=get_item_style("start"))
+    )
+    text = "🏆 **قسم المسابقات، الرتب والخصومات:**\n\nاختر ما ترغب بالاطلاع عليه:"
+    try:
+        bot.edit_message_text(text, chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+    except Exception:
+        bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+
 def promote_user_to_reseller(admin_id, target_uid):
     if admin_id != ADMIN_ID:
         return
@@ -962,7 +991,7 @@ def main_menu(chat_id, message_id=None):
 
     total_orders_count = get_total_completed_orders_count()
 
-    # القائمة الرئيسية المحدثة مع اختصار الأزرار وترتيبها بشكل منظم
+    # القائمة الرئيسية المحدثة مع الأزرار المدمجة الجديدة
     markup = types.InlineKeyboardMarkup(row_width=2)
     
     if not is_item_in_maintenance('our_services') or chat_id == ADMIN_ID:
@@ -973,8 +1002,8 @@ def main_menu(chat_id, message_id=None):
         types.InlineKeyboardButton(cart_btn_text, callback_data="view_my_cart", style=get_item_style("view_my_cart"))
     )
     markup.add(
-        types.InlineKeyboardButton("🏆 المسابقات والرتب والخصومات", callback_data="ranks_info", style=get_item_style("ranks_info")),
-        types.InlineKeyboardButton("🎁 الهدايا والكودات اليومية", callback_data="daily_reward", style=get_item_style("daily_reward"))
+        types.InlineKeyboardButton("🏆 المسابقات والرتب والخصومات", callback_data="menu_ranks_giveaways", style=get_item_style("menu_ranks_giveaways")),
+        types.InlineKeyboardButton("🎁 الهدايا والكودات اليومية", callback_data="menu_daily_gift", style=get_item_style("menu_daily_gift"))
     )
     markup.add(
         types.InlineKeyboardButton("🔄 تحويل نقاط", callback_data="transfer_points", style=get_item_style("transfer_points")),
@@ -985,7 +1014,6 @@ def main_menu(chat_id, message_id=None):
         types.InlineKeyboardButton("💳 شحن رصيد آسيا سيل (مباشر)", callback_data="asiacell_recharge_menu", style=get_item_style("asiacell_recharge_menu"))
     )
     
-    # دمج الدعم الفني والوكلاء في زر واحد ملون بالأحمر
     if not is_item_in_maintenance('support_btn') or chat_id == ADMIN_ID:
         markup.add(
             types.InlineKeyboardButton("👨‍💻 الدعم ووكلاء الشحن المعتمدين", url=SUPPORT_LINK, style=get_item_style("support_and_agents"))
@@ -1060,6 +1088,14 @@ def query(call):
                 )
             except Exception:
                 bot.send_message(chat_id, "⚠️ **عذراً، يجب عليك الاشتراك في القنوات أولاً للمتابعة:**", reply_markup=markup, parse_mode="Markdown")
+            return
+
+        # معالجة فتح القوائم المدمجة الجديدة
+        if data == 'menu_ranks_giveaways':
+            ranks_and_giveaways_menu(chat_id, message_id)
+            return
+        elif data == 'menu_daily_gift':
+            daily_and_gift_menu(chat_id, message_id)
             return
 
         if chat_id == ADMIN_ID:
@@ -2457,7 +2493,7 @@ def query(call):
                 f"💡 يتم تطبيق الخصم تلقائياً عند طلب أي خدمة!"
             )
             markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton("🔙 العودة للقائمة", callback_data='start', style=get_item_style('start')))
+            markup.add(types.InlineKeyboardButton("🔙 العودة للقائمة", callback_data='menu_ranks_giveaways', style=get_item_style('menu_ranks_giveaways')))
             bot.edit_message_text(text, chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
 
         elif data == 'referral_menu':
@@ -2519,7 +2555,7 @@ def query(call):
         elif data == 'enter_voucher_code':
             text_req = "🔑 **أرسل كود الشحن أو الهدية الآن:**"
             markup_back = types.InlineKeyboardMarkup()
-            markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='start', style=get_item_style('start')))
+            markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='menu_daily_gift', style=get_item_style('menu_daily_gift')))
             bot.edit_message_text(text_req, chat_id, message_id, reply_markup=markup_back, parse_mode="Markdown")
             bot.register_next_step_handler(call.message, process_user_redeem_input)
 
