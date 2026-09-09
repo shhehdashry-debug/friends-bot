@@ -3591,7 +3591,7 @@ def handle_commands(message):
 
         if chat_id != ADMIN_ID:
             try:
-                ifالقائمةeck_sub(chat_id):
+                if not check_sub(chat_id):
                     markup = types.InlineKeyboardMarkup()
                     for i in range(len(CHANNELS)):
                         markup.add(types.InlineKeyboardButton("اشترك في القناة 📢", url=CHANNEL_LINKS[i], style=get_item_style(CHANNEL_LINKS[i])))
