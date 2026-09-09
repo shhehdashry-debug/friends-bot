@@ -444,6 +444,27 @@ def get_service_price(user_id, base_price):
     discount = level_info['discount']
     return round(base_price * (1 - discount), 2)
 
+# ==========================================
+# أضف دالة التخفيضات التلقائية هنا تحت دالة get_service_price مباشرة:
+# ==========================================
+def calculate_bulk_discount_price(base_rate_per_1000, quantity):
+    """
+    حساب السعر التلقائي مع هامش ربحك 0.5$ لكل 1k، 
+    مع تطبيق خصم تصاعدي للكميات الكبيرة لتشجيع الوكلاء والتجار.
+    """
+    price_per_1k = base_rate_per_1000 + 0.5  
+    
+    discount_multiplier = 1.0
+    if quantity >= 20000:
+        discount_multiplier = 0.90  # خصم 10% للكميات الضخمة (20 ألف وأكثر)
+    elif quantity >= 10000:
+        discount_multiplier = 0.93  # خصم 7% للكميات الكبيرة (10 آلاف وأكثر)
+    elif quantity >= 5000:
+        discount_multiplier = 0.95  # خصم 5% لطلبات (5 آلاف وأكثر)
+        
+    total_price = (quantity / 1000.0) * price_per_1k * discount_multiplier
+    return round(total_price, 2)
+
 def promote_user_to_reseller(admin_id, target_uid):
     if admin_id != ADMIN_ID:
         return
