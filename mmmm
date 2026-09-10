@@ -971,7 +971,7 @@ def auto_check_orders_and_notifications():
                             supabase.table("user_orders").update({"status": status_ar}).eq("order_id", order['order_id']).execute()
                 except Exception as e:
                     print(f"Error checking order {order['order_id']}: {e}")
-        exceptException as e:
+        except Exception as e:
             print(f"Auto thread error: {e}")
 
 threading.Thread(target=auto_check_orders_and_notifications, daemon=True).start()
