@@ -908,7 +908,7 @@ def referral_menu(chat_id, message_id):
         invites = 0
 
     promo_text = (
-        "ماركت المهاجم للخدمات الاكترونية، 🔥\n"
+        "ماركت WhiteX للخدمات الأكترونية، 🔥\n"
         "عالم اخر من مختلف الخدمات: \n\n"
         "1-رشق انستغرام جميع الفئات( متابعين، لايكات...)\n"
         "2-رشق تلجرام جميع الفئات(اعضاء، ستارت بوتات، اعضاء مميزون للبحث)\n"
@@ -971,7 +971,7 @@ def auto_check_orders_and_notifications():
                             supabase.table("user_orders").update({"status": status_ar}).eq("order_id", order['order_id']).execute()
                 except Exception as e:
                     print(f"Error checking order {order['order_id']}: {e}")
-        except Exception as e:
+        exceptException as e:
             print(f"Auto thread error: {e}")
 
 threading.Thread(target=auto_check_orders_and_notifications, daemon=True).start()
@@ -982,6 +982,41 @@ def get_total_completed_orders_count():
         return res.count if res.count is not None else 0
     except Exception:
         return 0
+
+def recharge_points_menu(chat_id, message_id):
+    """عرض قائمة أسعار النقاط وطرق الدفع ووسائل الشحن مع زر آسياسيل المباشر"""
+    text = (
+        f"💎 **| أسعار نقاط بوت WhiteX** 💎\n\n"
+        f"🔹 `$1` = `10000` نقطة\n"
+        f"🔹 `$2` = `20000` نقطة\n"
+        f"🔹 `$3` = `30000` نقطة\n"
+        f"🔹 `$4` = `40000` نقطة\n"
+        f"🔹 `$5` = `50000` نقطة\n"
+        f"🔹 `$10` = `100000` نقطة\n"
+        f"🔹 `$20` = `200000` نقطة\n"
+        f"🔹 `$50` = `500000` نقطة\n"
+        f"🔹 `$150` = `1500000` نقطة\n\n"
+        f"───────────────────\n"
+        f"💳 **طرق الدفع المتاحة:**\n"
+        f"• آسيا سيل (حوالة أو كارت)\n"
+        f"• زين كاش\n"
+        f"• ماستر كارد\n"
+        f"───────────────────\n"
+        f"👨‍💻 **لشراء النقاط عبر الوكيل:**\n"
+        f"👉 `{SUPPORT_USER}`\n\n"
+        f"🎁 **ملاحظة:** هنالك نقاط إضافية عند الشحن التلقائي عبر بوت الشحن الفوري أدناه 👇"
+    )
+
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        types.InlineKeyboardButton("🔴 شحن النقاط تلقائي وفوري عبر آسياسيل", callback_data="asiacell_recharge_menu", style=get_item_style("asiacell_recharge_menu")),
+        types.InlineKeyboardButton("🔙 العودة للقائمة الرئيسية", callback_data="start", style=get_item_style("start"))
+    )
+
+    try:
+        bot.edit_message_text(text, chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+    except Exception:
+        bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
 
 
 def main_menu(chat_id, message_id=None):
@@ -1014,9 +1049,8 @@ def main_menu(chat_id, message_id=None):
         types.InlineKeyboardButton("🔥 الأكثر طلباً", callback_data="top_services", style=get_item_style("top_services")),
         types.InlineKeyboardButton(cart_btn_text, callback_data="view_my_cart", style=get_item_style("view_my_cart"))
     )
-    # إضافة زر حسابي بجانب السلة أو في مكان بارز
     markup.add(
-        types.InlineKeyboardButton("👤 حسابي ", callback_data="my_account_info", style=get_item_style("my_account_info")),
+        types.InlineKeyboardButton("👤 حسابي", callback_data="my_account_info", style=get_item_style("my_account_info")),
         types.InlineKeyboardButton("📦 طلباتي والتتبع الذكي", callback_data="my_orders", style=get_item_style("my_orders"))
     )
     markup.add(
@@ -1027,8 +1061,9 @@ def main_menu(chat_id, message_id=None):
         types.InlineKeyboardButton("🔄 تحويل نقاط", callback_data="transfer_points", style=get_item_style("transfer_points")),
         types.InlineKeyboardButton("👥 دعوة الأصدقاء", callback_data="referral_menu", style=get_item_style("referral_menu"))
     )
+    # زر شحن نقاط الجديد في القائمة الرئيسية بدلاً من زر آسيا القديم
     markup.add(
-        types.InlineKeyboardButton("💳 شحن رصيد آسيا سيل (مباشر)", callback_data="asiacell_recharge_menu", style=get_item_style("asiacell_recharge_menu"))
+        types.InlineKeyboardButton("💎 شحن نقاط", callback_data="menu_recharge_points", style=get_item_style("menu_recharge_points"))
     )
     
     if not is_item_in_maintenance('support_btn') or chat_id == ADMIN_ID:
@@ -1042,13 +1077,12 @@ def main_menu(chat_id, message_id=None):
     if chat_id == ADMIN_ID:
         markup.add(types.InlineKeyboardButton("⚙️ لوحة الإدارة", callback_data="admin_panel", style=get_item_style("admin_panel")))
 
-    # تم إضافة الآيدي في أول سطر مع النقاط
     text = (
+        f"أهلاً وسهلاً بك في بوت WhiteX للخدمات، فيه كل ما تحتاجه من الخدمات الإلكترونية ✨\n\n"
         f"🆔 آيدي المستخدم: <code>{chat_id}</code>\n"
-        f"💰 رصيدك: <b>{points}</b> نقطة\n\n"
-        f"نورت بوت المهاجم اولوياتنا رضا زبون 🌟\n"
-        f"🎖️ رتبتك الخدمات: <b>{status_text}</b>\n\n"
-        f"اختر القسم أو الخدمة المطلوبة:"
+        f"💰 رصيدك: <b>{points}</b> نقطة\n"
+        f"🎖️ رتبتك بالخدمات: <b>{status_text}</b>\n\n"
+        f"تفضل وأختر طلبك:"
     )
     
     if message_id:
@@ -1061,60 +1095,71 @@ def main_menu(chat_id, message_id=None):
 
 
 def show_user_account_info(chat_id, message_id):
-    """عرض معلومات الحساب المفصلة: تاريخ الشحن، وتاريخ وأسماء تفاصيل الطلبات السابقة"""
+    """عرض معلومات الحساب الشخصية والإحصائيات الشاملة بدون قائمة الطلبات"""
     u = get_user(chat_id)
     if not u:
-        try:
-            bot.answer_callback_query(call.id, "❌ لم يتم العثور على بيانات الحساب.", show_alert=True)
-        except Exception:
-            pass
         return
 
     total_recharged = u.get('total_recharged', 0.0) or 0.0
     total_spent = u.get('total_spent', 0.0) or 0.0
     points = u.get('points', 0.0) or 0.0
     level_info = get_user_level(chat_id)
-    
-    # تنسيق تاريخ آخر شحن أو إنشاء حساب إذا وجد (أو عرض الوقت الحالي/المسجل)
-    # ملاحظة: يمكنك اعتماد عمود 'last_order_ts' أو الوقت الحالي كمرجع
-    last_recharge_date = "متوفر بالسجل"
 
-    # جلب كافة طلبات المستخدم مع تفاصيل تاريخ الشراء واسم الطلبية وحالتها
-    orders_text = ""
+    invites_count = 0
     try:
-        res_orders = supabase.table("user_orders").select("*").eq("user_id", chat_id).order("order_id", desc=True).limit(15).execute()
-        orders = res_orders.data if res_orders.data else []
-        
-        if orders:
-            orders_text = "\n📋 **سجل العمليات والطلبات السابقة:**\n━━━━━━━━━━━━━━━━━━━\n"
-            for o in orders:
-                s_name = str(o.get('service', 'خدمة')).replace('<', '&lt;').replace('>', '&gt;')
-                status = o.get('status', 'قيد التنفيذ')
-                price = o.get('price', 0)
-                oid = o.get('order_id', 0)
-                ts = o.get('created_at_ts', 0)
-                
-                # تحويل الـ Timestamp إلى تاريخ قراءة بشري
-                if ts:
-                    date_str = datetime.fromtimestamp(ts).strftime('%Y-%m-%d | %H:%M')
-                else:
-                    date_str = "غير محدد"
-                    
-                icon = "⏳" if "قيد" in str(status) else ("❌" if "ملغي" in str(status) else "✅")
-                orders_text += f"🆔 `#{oid}` | 📅 {date_str}\n📦 **الطلب:** {s_name}\n💰 **السعر:** {price} نقطة | {icon} {status}\n───────────────────\n"
+        res_inv = supabase.table("users").select("user_id", count="exact", head=True).eq("referrer", str(chat_id)).execute()
+        invites_count = res_inv.count if res_inv.count is not None else 0
+    except Exception:
+        pass
+
+    total_orders_num = 0
+    completed_orders_num = 0
+    pending_orders_num = 0
+    try:
+        res_all_ord = supabase.table("user_orders").select("status").eq("user_id", chat_id).execute()
+        user_ords = res_all_ord.data if res_all_ord.data else []
+        total_orders_num = len(user_ords)
+        completed_orders_num = sum(1 for o in user_ords if "مكتمل" in str(o.get('status', '')))
+        pending_orders_num = sum(1 for o in user_ords if "قيد" in str(o.get('status', '')))
+    except Exception:
+        pass
+
+    next_rank_text = "أنت في أعلى رتبة حالياً 🏆"
+    if u.get('is_reseller') != 1:
+        spent_val = float(total_spent)
+        if spent_val < 50:
+            rem = round(50 - spent_val, 2)
+            next_rank_text = f"متبقي `{rem}` نقطة إنفاق للوصول إلى رتبة (تاجر مبتدئ 🥉)"
+        elif spent_val < 100:
+            rem = round(100 - spent_val, 2)
+            next_rank_text = f"متبقي `{rem}` نقطة إنفاق للوصول إلى رتبة (تاجر 🥈)"
+        elif spent_val < 150:
+            rem = round(150 - spent_val, 2)
+            next_rank_text = f"متبقي `{rem}` نقطة إنفاق للوصول إلى رتبة (تاجر جيد 🥇)"
+        elif spent_val < 200:
+            rem = round(200 - spent_val, 2)
+            next_rank_text = f"متبقي `{rem}` نقطة إنفاق للوصول إلى رتبة (تاجر محترف 💎)"
+        elif spent_val < 300:
+            rem = round(300 - spent_val, 2)
+            next_rank_text = f"متبقي `{rem}` نقطة إنفاق للوصول إلى رتبة (VIP 🏆)"
         else:
-            orders_text = "\n📋 **ليس لديك أي طلبات سابقة حتى الآن.**"
-    except Exception as e:
-        print(f"Error fetching orders for account info: {e}")
-        orders_text = "\n📋 تعذر جلب سجل الطلبات حالياً."
+            next_rank_text = "أنت مؤهل لتصبح (وكيل معتمد 🕶️)! تواصل مع الدعم."
 
     text = (
+        f"👤 **ملف حسابك والإحصائيات الشخصية:**\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
         f"🆔 الآيدي: `{chat_id}`\n"
-        f"🎖️ الرتبة: **{level_info['title']}**\n"
+        f"🎖️ الرتبة الحالية: **{level_info['title']}**\n"
+        f"📈 **التقدم للرتبة التالية:**\n{next_rank_text}\n\n"
         f"💰 الرصيد الحالي: `{points}` نقطة\n"
         f"💳 إجمالي ما شحنته: `{total_recharged}` نقطة\n"
         f"🛍️ إجمالي ما صرفته: `{total_spent}` نقطة\n"
-        f"{orders_text}"
+        f"👥 عدد الأشخاص المدعوين: `{invites_count}` شخص\n\n"
+        f"📊 **ملخص نشاطك العام:**\n"
+        f"• إجمالي الطلبات: `{total_orders_num}`\n"
+        f"• الطلبات المكتملة: `{completed_orders_num}` ✅\n"
+        f"• الطلبات قيد التنفيذ: `{pending_orders_num}` ⏳\n"
+        f"*(للاطلاع على تفاصيل وسجل الطلبات الكامل، يرجى استخدام زر 'طلباتي والتتبع الذكي' في القائمة الرئيسية)*"
     )
 
     markup = types.InlineKeyboardMarkup(row_width=1)
@@ -1182,11 +1227,12 @@ def query(call):
         elif data == 'menu_daily_gift':
             daily_and_gift_menu(chat_id, message_id)
             return
-   
         elif data == 'my_account_info':
             show_user_account_info(chat_id, message_id)
             return
-   
+        elif data == 'menu_recharge_points':
+            recharge_points_menu(chat_id, message_id)
+            return
         elif data == 'menu_support_agents':
             support_and_agents_menu(chat_id, message_id)
             return
@@ -2180,7 +2226,7 @@ def query(call):
         elif data == 'asiacell_recharge_menu':
             markup = types.InlineKeyboardMarkup()
             markup.add(types.InlineKeyboardButton("تسجيل دخول آسيا سيل", callback_data="asiacell_login_for_charge", style=get_item_style('asiacell_login_for_charge')))
-            markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="start", style=get_item_style('start')))
+            markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="menu_recharge_points", style=get_item_style('menu_recharge_points')))
             bot.edit_message_text("💳 لشحن رصيدك عبر آسيا سيل، ابدأ بتسجيل رقمك:", chat_id, message_id, reply_markup=markup)
             return
 
@@ -2676,7 +2722,7 @@ def query(call):
                 markup.add(types.InlineKeyboardButton("✍️ اختيار العدد بنفسك (يدوي)", callback_data=f"custom_{srv_key}", style=get_item_style(f"custom_{srv_key}")))
                 markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='our_services', style=get_item_style('our_services')))
                 
-                custom_desc = srv_data_item.get('msg', 'اختر الكمية المطلوبة من الأزرار أدناه أو أدخلها يدوياًة:')
+                custom_desc = srv_data_item.get('msg', 'اختر الكمية المطلوبة من الأزرار أدناه أو أدخلها يدوياً:')
                 text_menu = f"📦 **{srv_data_item['name']}**\n━━━━━━━━━━━━━━━━━━━\n\n{custom_desc}\n\nاختر الكمية المطلوبة:"
                 try:
                     bot.edit_message_text(text_menu, chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
