@@ -3159,6 +3159,7 @@ def step_subcat_name(message):
     sub_key_id = f"sub_{int(time.time())}"
     SUB_CATEGORIES[cat_key].append({'name': subcat_name, 'callback': sub_key_id})
     
+    # حفظ القاموس المحدث بالكامل في جدول settings في سوبايس لضمان استمراريته وقراءته
     try:
         supabase.table("settings").upsert({
             "key": "custom_sub_categories",
