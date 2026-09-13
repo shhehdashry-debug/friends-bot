@@ -2341,19 +2341,32 @@ def query(call):
             markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='our_services', style=get_item_style('our_services')))
             update_menu_safely(bot, chat_id, message_id, 'cat_telegram', markup)
 
-        elif data.startswith('cat_') and data != 'cat_games':
+        elif data.startswith('cat_') and data not in ['cat_games', 'cat_insta', 'cat_telegram', 'cat_itunes', 'cat_esim']:
             if is_item_in_maintenance(data) and chat_id != ADMIN_ID:
                 bot.send_message(chat_id, "🛠️ هذا القسم قيد الصيانة حالياً.")
                 return
+                
             markup = types.InlineKeyboardMarkup(row_width=1)
-            found_custom = False
+            
+            # 1. عرض الأقسام الفرعية التابعة لهذا القسم (إن وجدت)
+            subs = SUB_CATEGORIES.get(data, [])
+            for sub in subs:
+                cb_val = sub.get('callback')
+                if not cb_val.startswith('sub_'):
+                    cb_val = f"sub_{cb_val}"
+                markup.add(types.InlineKeyboardButton(f"📁 {sub['name']}", callback_data=cb_val, style=get_item_style(cb_val)))
+
+            # 2. عرض الخدمات المباشرة التي تنتمي لهذا القسم مباشرة بدون قسم فرعي
+            found_items = False
             for k, v in SERVICES.items():
                 if v.get('category') == data and not v.get('subcat'):
                     if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
                         markup.add(types.InlineKeyboardButton(f"📦 {v.get('btn_label', v['name'])} ({v.get('price', 0)} ن)", callback_data=k, style=get_item_style(k)))
-                        found_custom = True
-            if not found_custom:
-                markup.add(types.InlineKeyboardButton("⚠️ لا توجد خدمات مضافة في هذا القسم حالياً", callback_data='ignore', style=get_item_style('ignore')))
+                        found_items = True
+
+            if not subs and not found_items:
+                markup.add(types.InlineKeyboardButton("⚠️ لا توجد أقسام فرعية أو خدمات هنا حالياً", callback_data='ignore', style=get_item_style('ignore')))
+
             markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='our_services', style=get_item_style('our_services')))
             update_menu_safely(bot, chat_id, message_id, data, markup)
             return
