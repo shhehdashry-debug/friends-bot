@@ -445,19 +445,15 @@ def get_service_price(user_id, base_price):
 # دالة التخفيضات التلقائية للكميات الكبيرة
 # ==========================================
 def calculate_bulk_discount_price(base_rate_per_1000, quantity):
-    """
-    حساب السعر التلقائي مع هامش ربحك 0.5$ لكل 1k، 
-    مع تطبيق خصم تصاعدي للكميات الكبيرة لتشجيع الوكلاء والتجار.
-    """
     price_per_1k = base_rate_per_1000 + 0.5  
     
     discount_multiplier = 1.0
     if quantity >= 20000:
-        discount_multiplier = 0.90  # خصم 10% للكميات الضخمة (20 ألف وأكثر)
+        discount_multiplier = 0.90  
     elif quantity >= 10000:
-        discount_multiplier = 0.93  # خصم 7% للكميات الكبيرة (10 آلاف وأكثر)
+        discount_multiplier = 0.93  
     elif quantity >= 5000:
-        discount_multiplier = 0.95  # خصم 5% لطلبات (5 آلاف وأكثر)
+        discount_multiplier = 0.95  
         
     total_price = (quantity / 1000.0) * price_per_1k * discount_multiplier
     return round(total_price, 2)
@@ -492,7 +488,6 @@ def ranks_and_giveaways_menu(chat_id, message_id):
         bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
 
 def support_and_agents_menu(chat_id, message_id):
-    """واجهة فرعية للاختيار بين الدعم الفني أو وكلاء الشحن المعتمدين"""
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(
         types.InlineKeyboardButton("👨‍💻 تواصل مع الدعم الفني", url=SUPPORT_LINK, style=get_item_style("support_btn")),
@@ -984,7 +979,6 @@ def get_total_completed_orders_count():
         return 0
 
 def recharge_points_menu(chat_id, message_id):
-    """عرض قائمة أسعار النقاط وطرق الدفع ووسائل الشحن مع زر آسياسيل المباشر"""
     text = (
         "🔹 | اسعار نقاط بوت WhiteX 🔹\n\n"
         "- $1 = 1 نقطة 💎\n"
@@ -1005,7 +999,6 @@ def recharge_points_menu(chat_id, message_id):
         "                         أو\n"
         "الشحن عن طريق الازرار في الأسفل 👇"
     )
-
 
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(
@@ -1061,7 +1054,6 @@ def main_menu(chat_id, message_id=None):
         types.InlineKeyboardButton("🔄 تحويل نقاط", callback_data="transfer_points", style=get_item_style("transfer_points")),
         types.InlineKeyboardButton("👥 دعوة الأصدقاء", callback_data="referral_menu", style=get_item_style("referral_menu"))
     )
-    # زر شحن نقاط الجديد في القائمة الرئيسية بدلاً من زر آسيا القديم
     markup.add(
         types.InlineKeyboardButton("💎 شحن نقاط", callback_data="menu_recharge_points", style=get_item_style("menu_recharge_points"))
     )
@@ -1095,7 +1087,6 @@ def main_menu(chat_id, message_id=None):
 
 
 def show_user_account_info(chat_id, message_id):
-    """عرض معلومات الحساب الشخصية والإحصائيات الشاملة بدون قائمة الطلبات"""
     u = get_user(chat_id)
     if not u:
         return
@@ -1199,7 +1190,6 @@ def query(call):
         except Exception:
             pass
 
-        # 🔹 فحص الاشتراك الإجباري المستمر مع كل ضغطة زر (باستثناء المالك)
         if chat_id != ADMIN_ID and not check_sub(chat_id):
             try:
                 bot.answer_callback_query(call.id, "❌ يجب عليك الاشتراك في القنوات أولاً!", show_alert=True)
@@ -1220,7 +1210,6 @@ def query(call):
                 bot.send_message(chat_id, "⚠️ **عذراً، يجب عليك الاشتراك في القنوات أولاً للمتابعة:**", reply_markup=markup, parse_mode="Markdown")
             return
 
-        # معالجة فتح القوائم المدمجة الجديدة
         if data == 'menu_ranks_giveaways':
             ranks_and_giveaways_menu(chat_id, message_id)
             return
@@ -1366,8 +1355,12 @@ def query(call):
 
             elif data == 'skip_srv_desc':
                 if chat_id in temp_add_service:
-                    temp_add_service[chat_id]['msg'] = "أرسل الرابط المطلوب:"
-                ask_for_tiers_input(chat_id)
+                    s_id = temp_add_service[chat_id].get('service_id', 1)
+                    if s_id == 0:
+                        skip_manual_srv_desc(chat_id)
+                    else:
+                        temp_add_service[chat_id]['msg'] = "أرسل الرابط المطلوب:"
+                        ask_for_tiers_input(chat_id)
                 return
 
             elif data == 'adm_manage_services':
@@ -2735,7 +2728,7 @@ def query(call):
                 
                 pending_orders_cache[chat_id] = {
                     'service_id': 0,
-                    'qty': 1,
+                    'qty': srv_data_item.get('qty', 1),
                     'name': srv_data_item['name'],
                     'price': final_price,
                     'link': 'بطاقة رقمية / خدمة مباشرة'
@@ -2889,10 +2882,10 @@ def query(call):
                 order_id = get_next_order_id()
                 username = call.from_user.username or "لا يوجد"
                 link_info = order_data.get('link', 'خدمة مباشرة')
-                save_order(order_id, chat_id, username, order_data['name'], final_price, "0", link_info, 0, 1)
+                save_order(order_id, chat_id, username, order_data['name'], final_price, "0", link_info, 0, order_data.get('qty', 1))
                 bot.send_message(ADMIN_ID, f"📦 **طلب جديد (يدوي/لعبة):**\n🆔 رقم الطلب: `{order_id}`\n👤 المستخدم: `{chat_id}` (@{username})\n📦 الخدمة: {order_data['name']}\n🎮 التفاصيل: `{link_info}`", parse_mode="Markdown")
                 bot.send_message(chat_id, f"✅ **تم استلام طلبك بنجاح!**\n🆔 رقم الطلب: `{order_id}`\n📩 تواصل مع الدعم لاستلام الطلب: {SUPPORT_USER}", parse_mode="Markdown")
-                send_proof_to_channel(chat_id, order_id, order_data['name'], 1, link_info)
+                send_proof_to_channel(chat_id, order_id, order_data['name'], order_data.get('qty', 1), link_info)
 
         elif data == 'cancel_order_now':
             if chat_id in pending_orders_cache:
@@ -3188,7 +3181,8 @@ def step_srv_name(message):
 def step_srv_id(message):
     chat_id = message.chat.id
     try:
-        temp_add_service[chat_id]['service_id'] = int(message.text.strip())
+        s_id = int(message.text.strip())
+        temp_add_service[chat_id]['service_id'] = s_id
         
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton("تخطي الوصف ⏭️", callback_data="skip_srv_desc", style=get_item_style('skip_srv_desc')))
@@ -3200,7 +3194,12 @@ def step_srv_id(message):
             parse_mode="Markdown",
             reply_markup=markup
         )
-        bot.register_next_step_handler(msg, step_srv_desc_input)
+        
+        if s_id == 0:
+            bot.register_next_step_handler(msg, step_manual_srv_desc_input)
+        else:
+            bot.register_next_step_handler(msg, step_srv_desc_input)
+            
     except ValueError:
         markup_back = types.InlineKeyboardMarkup()
         markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
@@ -3350,6 +3349,87 @@ def process_generic_custom_qty(message, base_service_key):
         markup_back = types.InlineKeyboardMarkup()
         markup_back.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='our_services', style=get_item_style('our_services')))
         bot.send_message(chat_id, "⚠️ يرجى إدخال أرقام صحيحة فقط:", reply_markup=markup_back)
+
+def step_manual_srv_desc_input(message):
+    chat_id = message.chat.id
+    text_val = message.text.strip()
+    if chat_id in temp_add_service:
+        temp_add_service[chat_id]['msg'] = text_val
+    
+    markup_back = types.InlineKeyboardMarkup()
+    markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
+    
+    msg = bot.send_message(
+        chat_id,
+        "✍️ **أدخل الكمية والسعر بهذه الصيغة المبسطة:**\n`الكمية:السعر`\n\n*مثال:*\n`1:5` (يعني قطعة واحدة بـ 5 نقاط)\nأو `100:2` (يعني 100 وحدة بـ 2 نقطة)",
+        parse_mode="Markdown",
+        reply_markup=markup_back
+    )
+    bot.register_next_step_handler(msg, step_manual_srv_save_final)
+
+def skip_manual_srv_desc(chat_id):
+    if chat_id in temp_add_service:
+        temp_add_service[chat_id]['msg'] = "🎮 **أرسل الآيدي أو المعلومات المطلوبة للخدمة:**"
+    
+    markup_back = types.InlineKeyboardMarkup()
+    markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
+    
+    msg = bot.send_message(
+        chat_id,
+        "✍️ **أدخل الكمية والسعر بهذه الصيغة المبسطة:**\n`الكمية:السعر`\n\n*مثال:*\n`1:5`",
+        parse_mode="Markdown",
+        reply_markup=markup_back
+    )
+    bot.register_next_step_handler(msg, step_manual_srv_save_final)
+
+def step_manual_srv_save_final(message):
+    chat_id = message.chat.id
+    text_val = message.text.strip()
+    
+    if text_val == "إلغاء":
+        if chat_id in temp_add_service:
+            del temp_add_service[chat_id]
+        bot.send_message(chat_id, "❌ تم إلغاء إضافة الخدمة.")
+        return
+
+    srv = temp_add_service.get(chat_id)
+    if not srv: 
+        return
+    try:
+        parts = text_val.split(':')
+        if len(parts) == 2:
+            qty = int(parts[0].strip())
+            price = float(parts[1].strip())
+        else:
+            raise ValueError("صيغة غير صحيحة")
+            
+        key = f"custom_srv_{int(time.time())}"
+        SERVICES[key] = {
+            'name': srv['name'], 
+            'btn_label': srv['name'][:30],
+            'service_id': 0, 
+            'category': srv['category'],
+            'subcat': srv.get('subcat'),
+            'msg': srv.get('msg', '🎮 **أرسل الآيدي أو المعلومات المطلوبة للخدمة اليدوية:**'), 
+            'price': price,
+            'qty': qty,
+            'is_custom_tiers': False
+        }
+        
+        custom_only = {k: v for k, v in SERVICES.items() if k.startswith('custom_srv_')}
+        supabase.table("settings").upsert({
+            "key": "custom_services_list", 
+            "val_text": json.dumps(custom_only, ensure_ascii=False)
+        }, on_conflict="key").execute()
+        
+        bot.send_message(chat_id, f"✅ **تمت إضافة الخدمة اليدوية بنجاح!**\n📦 الكمية: `{qty}`\n💰 السعر: `{price}` نقطة", parse_mode="Markdown")
+        del temp_add_service[chat_id]
+    except Exception as e:
+        markup_back = types.InlineKeyboardMarkup()
+        markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
+        msg = bot.send_message(chat_id, f"⚠️ الصيغة غير صحيحة. أرسل بالشكل `الكمية:السعر` (مثال `1:5`):", reply_markup=markup_back)
+        bot.register_next_step_handler(msg, step_manual_srv_save_final)
+
 
 def process_update_single_price(message, service_key):
     try:
