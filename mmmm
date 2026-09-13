@@ -1011,6 +1011,38 @@ def recharge_points_menu(chat_id, message_id):
     except Exception:
         bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
 
+def load_custom_categories_from_db():
+    try:
+        res = supabase.table("settings").select("val_text").eq("key", "custom_categories_list").execute()
+        if res.data and res.data[0].get('val_text'):
+            txt = res.data[0]['val_text']
+            if txt:
+                saved_cats = json.loads(txt)
+                for k, v in saved_cats.items():
+                    CATEGORIES[k] = v
+    except Exception as e:
+        print(f"Error loading custom categories: {e}")
+
+load_custom_categories_from_db()
+
+def load_manual_services_from_supabase_table():
+    try:
+        res = supabase.table("custom_services").select("*").execute()
+        if res.data:
+            for row in res.data:
+                s_key = row.get("service_key")
+                s_data_str = row.get("service_data")
+                if s_key and s_data_str:
+                    try:
+                        s_dict = json.loads(s_data_str)
+                        SERVICES[s_key] = s_dict
+                    except Exception as parse_err:
+                        print(f"Error parsing manual service {s_key}: {parse_err}")
+    except Exception as e:
+        print(f"Error loading manual services from table: {e}")
+
+load_manual_services_from_supabase_table()
+
 
 def main_menu(chat_id, message_id=None):
     if is_banned(chat_id):
@@ -3141,7 +3173,18 @@ def step_add_category_name(message):
         return
     cat_key = data['new_cat_key']
     CATEGORIES[cat_key] = cat_name
-    bot.send_message(chat_id, f"✅ **تم إضافة القسم الجديد ({cat_name}) بنجاح!**", parse_mode="Markdown")
+    
+    # حفظ وتحديث الأقسام الرئيسية في سوبايس لتبقى دائمة
+    try:
+        custom_cats_only = {k: v for k, v in CATEGORIES.items() if k.startswith('cat_')}
+        supabase.table("settings").upsert({
+            "key": "custom_categories_list",
+            "val_text": json.dumps(custom_cats_only, ensure_ascii=False)
+        }, on_conflict="key").execute()
+    except Exception as e:
+        print(f"Error saving category to DB: {e}")
+
+    bot.send_message(chat_id, f"✅ **تم إضافة وحفظ القسم الرئيسي ({cat_name}) بنجاح!**", parse_mode="Markdown")
     del temp_add_service[chat_id]
 
 def step_subcat_name(message):
@@ -3405,30 +3448,41 @@ def step_manual_srv_save_final(message):
             raise ValueError("صيغة غير صحيحة")
             
         key = f"custom_srv_{int(time.time())}"
-        SERVICES[key] = {
+        subcat_val = srv.get('subcat')
+        category_val = srv.get('category')
+
+        service_payload = {
             'name': srv['name'], 
             'btn_label': srv['name'][:30],
             'service_id': 0, 
-            'category': srv['category'],
-            'subcat': srv.get('subcat'),
+            'category': category_val,
+            'subcat': subcat_val,
             'msg': srv.get('msg', '🎮 **أرسل الآيدي أو المعلومات المطلوبة للخدمة اليدوية:**'), 
             'price': price,
             'qty': qty,
             'is_custom_tiers': False
         }
         
-        custom_only = {k: v for k, v in SERVICES.items() if k.startswith('custom_srv_')}
-        supabase.table("settings").upsert({
-            "key": "custom_services_list", 
-            "val_text": json.dumps(custom_only, ensure_ascii=False)
-        }, on_conflict="key").execute()
+        # حفظ في الذاكرة المحلية للبوت
+        SERVICES[key] = service_payload
         
-        bot.send_message(chat_id, f"✅ **تمت إضافة الخدمة اليدوية بنجاح!**\n📦 الكمية: `{qty}`\n💰 السعر: `{price}` نقطة", parse_mode="Markdown")
+        # تخزين دائم في جدول custom_services في سوبايس
+        try:
+            supabase.table("custom_services").upsert({
+                "service_key": key,
+                "category": category_val,
+                "subcat": subcat_val,
+                "service_data": json.dumps(service_payload, ensure_ascii=False)
+            }, on_conflict="service_key").execute()
+        except Exception as db_err:
+            print(f"Error saving manual service to Supabase: {db_err}")
+        
+        bot.send_message(chat_id, f"✅ **تمت إضافة وحفظ الخدمة اليدوية في القسم المطلوب بنجاح!**\n📦 الكمية: `{qty}`\n💰 السعر: `{price}` نقطة", parse_mode="Markdown")
         del temp_add_service[chat_id]
     except Exception as e:
         markup_back = types.InlineKeyboardMarkup()
         markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
-        msg = bot.send_message(chat_id, f"⚠️ الصيغة غير صحيحة. أرسل بالشكل `الكمية:السعر` (مثال `1:5`):", reply_markup=markup_back)
+        msg = bot.send_message(chat_id, f"⚠️ الصيغة غير صحيحة. أرسل بالشكل `الكمية:السعر` (مثال `1:5` أو `65:1.5`):", reply_markup=markup_back)
         bot.register_next_step_handler(msg, step_manual_srv_save_final)
 
 
