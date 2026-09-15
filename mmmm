@@ -1222,25 +1222,38 @@ def query(call):
         except Exception:
             pass
 
-        if chat_id != ADMIN_ID and not check_sub(chat_id):
-            try:
-                bot.answer_callback_query(call.id, "❌ يجب عليك الاشتراك في القنوات أولاً!", show_alert=True)
-            except Exception:
-                pass
-            
-            markup = types.InlineKeyboardMarkup()
-            for i in range(len(CHANNELS)):
-                markup.add(types.InlineKeyboardButton(f"اشترك في القناة {i+1} 📢", url=CHANNEL_LINKS[i], style=get_item_style(CHANNEL_LINKS[i])))
-            markup.add(types.InlineKeyboardButton("تحققت من الاشتراك ✅", callback_data='start', style=get_item_style('start')))
-            
-            try:
-                bot.edit_message_text(
-                    "⚠️ **عذراً، يجب عليك الاشتراك في القنوات الإجبارية أولاً للمتابعة والاستخدام:**",
-                    chat_id, message_id, reply_markup=markup, parse_mode="Markdown"
-                )
-            except Exception:
-                bot.send_message(chat_id, "⚠️ **عذراً، يجب عليك الاشتراك في القنوات أولاً للمتابعة:**", reply_markup=markup, parse_mode="Markdown")
+        # ==========================================
+        # فحص الاشتراك الإجباري كل 24 ساعة عند الضغط على أي زر
+        # ==========================================
+        if chat_id != ADMIN_ID and data not in ['start', 'back_start']:
+            if should_check_subscription(chat_id):
+                if not check_sub(chat_id):
+                    markup = types.InlineKeyboardMarkup()
+                    for i in range(len(CHANNELS)):
+                        markup.add(types.InlineKeyboardButton(f"اشترك في القناة {i+1} 📢", url=CHANNEL_LINKS[i], style=get_item_style(CHANNEL_LINKS[i])))
+                    markup.add(types.InlineKeyboardButton("تحققت من الاشتراك ✅", callback_data='start', style=get_item_style('start')))
+                    
+                    try:
+                        bot.edit_message_text(
+                            "⚠️ **عذراً، لقد انتهت مدة التحقق (24 ساعة). يجب عليك الاشتراك في القنوات الإجبارية للمتابعة:**",
+                            chat_id, message_id, reply_markup=markup, parse_mode="Markdown"
+                        )
+                    except Exception:
+                        bot.send_message(chat_id, "⚠️ **عذراً، يجب عليك الاشتراك في القنوات أولاً للمتابعة:**", reply_markup=markup, parse_mode="Markdown")
+                    return
+                else:
+                    # إذا كان مشتركاً، نحدث وقت الفحص لكي لا يفحصه مرة أخرى إلا بعد 24 ساعة
+                    update_sub_check_time(chat_id)
+        # ==========================================
+
+        if data == 'menu_ranks_giveaways':
+            ranks_and_giveaways_menu(chat_id, message_id)
             return
+        elif data == 'menu_daily_gift':
+            daily_and_gift_menu(chat_id, message_id)
+            return
+        # ... وباقي أجزاء الكود المعتادة
+
 
         if data == 'menu_ranks_giveaways':
             ranks_and_giveaways_menu(chat_id, message_id)
@@ -2760,7 +2773,7 @@ def query(call):
                 markup.add(types.InlineKeyboardButton("✍️ اختيار العدد بنفسك (يدوي)", callback_data=f"custom_{srv_key}", style=get_item_style(f"custom_{srv_key}")))
                 markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='our_services', style=get_item_style('our_services')))
                 
-                custom_desc = srv_data_item.get('msg', 'اختر الكمية المطلوبة من الأزرار أدناه أو أدخلها يدوياً:')
+                custom_desc = srv_data_item.get('msg', 'اختر الكمية المطلوبة من الأزرار أدناه أو أدخلها يدوياًة:')
                 text_menu = f"📦 **{srv_data_item['name']}**\n━━━━━━━━━━━━━━━━━━━\n\n{custom_desc}\n\nاختر الكمية المطلوبة:"
                 try:
                     bot.edit_message_text(text_menu, chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
@@ -3378,7 +3391,8 @@ def process_generic_custom_qty(message, base_service_key):
         else:
             price_per_1000 = service_data.get('price', 1.0)
 
-        cost_for_qty = (qty / 1000.0) * price_per_1000
+        # استدعاء دالة الخصم التلقائي للكميات الكبيرة (5k, 10k, 20k)
+        cost_for_qty = calculate_bulk_discount_price(price_per_1000 - 0.5, qty)
         final_price = get_service_price(chat_id, cost_for_qty)
 
         srv_cat = service_data.get('category', '')
@@ -3542,6 +3556,30 @@ def process_update_bulk_price_decrease(message):
         bot.send_message(message.chat.id, f"✅ **تم خفض جميع أسعار البوت بنسبة ({pct}%) بنجاح!**", parse_mode="Markdown")
     except ValueError:
         bot.send_message(message.chat.id, "⚠️ يرجى إدخال نسبة مئوية صحيحة.")
+
+def should_check_subscription(user_id):
+    if user_id == ADMIN_ID:
+        return True
+    
+    u = get_user(user_id)
+    if not u:
+        return True
+        
+    last_check = u.get('last_sub_check', 0) or 0
+    current_time = int(time.time())
+    
+    # 24 ساعة = 86400 ثانية
+    if current_time - last_check > 86400:
+        return True # مرت 24 ساعة، يحتاج فحص جديد
+    
+    return False # لم تمر 24 ساعة، لا داعي للفحص
+
+def update_sub_check_time(user_id):
+    try:
+        supabase.table("users").update({"last_sub_check": int(time.time())}).eq("user_id", user_id).execute()
+    except Exception as e:
+        print(f"Error updating sub check time: {e}")
+
 
 def process_update_bulk_price_increase(message):
     try:
