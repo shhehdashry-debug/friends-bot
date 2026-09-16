@@ -6,6 +6,7 @@ import time
 import threading
 import json
 import uuid
+import logging
 import requests
 from urllib.parse import quote
 from telebot import types
@@ -59,7 +60,65 @@ pending_orders_cache = {}
 transfer_cache = {}        
 user_carts = {}            
 maintenance_items = set()  
-temp_add_service = {}      
+temp_add_service = {}
+
+# ==========================================
+# ⚡ Caches لتقليل اتصالات Supabase وTelegram
+# ==========================================
+SUB_CACHE = {}
+SUB_CACHE_TTL = 5 * 60          # فحص الاشتراك: 5 دقائق
+MAINTENANCE_CACHE = {"value": False, "time": 0}
+MAINTENANCE_CACHE_TTL = 10       # الصيانة: 10 ثوانٍ
+ORDERS_COUNT_CACHE = {"value": 0, "time": 0}
+ORDERS_COUNT_CACHE_TTL = 60      # العدد الإجمالي: دقيقة واحدة
+
+# ==========================================
+# ⚡ طبقة تحسين الأداء وإدارة الكاش
+# ==========================================
+SETTINGS_CACHE = {}
+MENU_DESC_CACHE_TTL = 120
+
+CACHE_CLEANUP_INTERVAL = 300
+_last_cache_cleanup = 0
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
+logger = logging.getLogger("whitex_bot")
+
+
+def _cleanup_runtime_caches():
+    """تنظيف الكاشات المؤقتة القديمة حتى لا تكبر الذاكرة بلا حدود."""
+    global _last_cache_cleanup
+    now = time.time()
+
+    if now - _last_cache_cleanup < CACHE_CLEANUP_INTERVAL:
+        return
+
+    _last_cache_cleanup = now
+
+    try:
+        expired = [
+            uid for uid, value in SUB_CACHE.items()
+            if not value or now - value[1] >= SUB_CACHE_TTL
+        ]
+        for uid in expired:
+            SUB_CACHE.pop(uid, None)
+    except Exception:
+        pass
+
+    try:
+        for uid, timestamps in list(user_click_tracker.items()):
+            fresh = [t for t in timestamps if now - t < 3]
+            if fresh:
+                user_click_tracker[uid] = fresh
+            else:
+                user_click_tracker.pop(uid, None)
+    except Exception:
+        pass
+
+      
 admin_states = {}          
 user_recharge_states = {} 
 usdt_recharge_states = {}
@@ -111,25 +170,25 @@ def get_asia_headers(access_token=None):
 def send_asia_login_request(phone_number_to_login):
     url_login = f"{ASIA_BASE_URL}login?lang=en"
     payload_login = {"captchaCode": "", "username": phone_number_to_login}
-    res_login = requests.post(url_login, data=json.dumps(payload_login), headers=get_asia_headers())
+    res_login = http_session.post(url_login, data=json.dumps(payload_login), headers=get_asia_headers(), timeout=20)
     return res_login.json()
 
 def send_asia_sms_validation_request(pid_value, passcode_value):
     url_verify = f"{ASIA_BASE_URL}smsvalidation?lang=en"
     payload_verify = {"PID": pid_value, "passcode": passcode_value, "token": ""}
-    res_verify = requests.post(url_verify, data=json.dumps(payload_verify), headers=get_asia_headers())
+    res_verify = http_session.post(url_verify, data=json.dumps(payload_verify), headers=get_asia_headers(), timeout=20)
     return res_verify.json()
 
 def send_asia_credit_transfer_start_request(amount_value, receiver_msisdn, admin_access_token):
     url_start_transfer = f"{ASIA_BASE_URL}credit-transfer/start?lang=ar"
     payload_start = {"amount": amount_value, "receiverMsisdn": receiver_msisdn}
-    res_start = requests.post(url_start_transfer, data=json.dumps(payload_start), headers=get_asia_headers(admin_access_token))
+    res_start = http_session.post(url_start_transfer, data=json.dumps(payload_start), headers=get_asia_headers(admin_access_token), timeout=20)
     return res_start.json()
 
 def send_asia_credit_transfer_confirm_request(pid_transfer_value, transfer_passcode_value, admin_access_token):
     url_confirm = f"{ASIA_BASE_URL}credit-transfer/do-transfer?lang=ar"
     payload_confirm = {"PID": pid_transfer_value, "passcode": transfer_passcode_value}
-    res_confirm = requests.post(url_confirm, data=json.dumps(payload_confirm), headers=get_asia_headers(admin_access_token))
+    res_confirm = http_session.post(url_confirm, data=json.dumps(payload_confirm), headers=get_asia_headers(admin_access_token), timeout=20)
     return res_confirm.json()
 
 def check_spam(user_id):
@@ -353,9 +412,13 @@ def find_user_by_id_or_username(query_str):
         print(f"Search user error: {e}")
     return None
 
-def get_points(user_id, user_data=None):
-    u = user_data if user_data is not None else get_user(user_id)
+def get_points(user_id):
+    u = get_user(user_id)
     return round(float(u['points']), 2) if u and 'points' in u and u['points'] is not None else 0.0
+
+def invalidate_user_runtime_cache(user_id):
+    SUB_CACHE.pop(user_id, None)
+
 
 def update_points(user_id, amount, is_recharge=False):
     u = get_user(user_id)
@@ -378,29 +441,38 @@ def is_banned(user_id):
     u = get_user(user_id)
     return bool(u.get('is_banned', 0)) if u else False
 
-MAINTENANCE_CACHE = {"value": False, "time": 0}
-MAINTENANCE_CACHE_TTL = 10  # ثواني
-
 def is_maintenance(force_refresh=False):
+    """قراءة وضع الصيانة مع Cache قصير لتقليل اتصالات Supabase."""
     now = time.time()
-    if not force_refresh and now - MAINTENANCE_CACHE["time"] < MAINTENANCE_CACHE_TTL:
-        return MAINTENANCE_CACHE["value"]
+
+    if (
+        not force_refresh
+        and now - MAINTENANCE_CACHE.get("time", 0) < MAINTENANCE_CACHE_TTL
+    ):
+        return bool(MAINTENANCE_CACHE.get("value", False))
+
     try:
         res = supabase.table("settings").select("val").eq("key", "maintenance").execute()
-        value = bool(res.data[0]['val']) if res.data else False
-        MAINTENANCE_CACHE.update({"value": value, "time": now})
+        value = bool(res.data[0].get("val")) if res.data else False
+        MAINTENANCE_CACHE["value"] = value
+        MAINTENANCE_CACHE["time"] = now
         return value
-    except Exception:
-        return MAINTENANCE_CACHE["value"]
+    except Exception as e:
+        logger.warning("Maintenance check failed: %s", e)
+        return False
+
 
 def toggle_maintenance():
     curr = is_maintenance(force_refresh=True)
     new_val = 0 if curr else 1
     try:
         supabase.table("settings").upsert({"key": "maintenance", "val": new_val}).execute()
-        MAINTENANCE_CACHE.update({"value": bool(new_val), "time": time.time()})
+        MAINTENANCE_CACHE["value"] = bool(new_val)
+        MAINTENANCE_CACHE["time"] = time.time()
     except Exception as e:
         print(f"Error toggling maintenance: {e}")
+    MAINTENANCE_CACHE["value"] = bool(new_val)
+    MAINTENANCE_CACHE["time"] = time.time()
     return new_val
 
 def is_item_in_maintenance(item_key):
@@ -414,36 +486,50 @@ def toggle_item_maintenance(item_key):
         maintenance_items.add(item_key)
         return True
 
-MENU_DESC_CACHE = {}
-MENU_DESC_CACHE_TTL = 60  # ثانية
-
 def get_menu_description(menu_key, default_text=""):
+    """جلب وصف القائمة مع Cache حتى لا نكرر استعلام settings."""
     now = time.time()
-    cached = MENU_DESC_CACHE.get(menu_key)
-    if cached and now - cached[0] < MENU_DESC_CACHE_TTL:
-        return cached[1]
+    cache_key = f"desc:{menu_key}"
+    cached = SETTINGS_CACHE.get(cache_key)
+
+    if cached and now - cached[1] < MENU_DESC_CACHE_TTL:
+        return cached[0]
+
     try:
-        res = supabase.table("settings").select("val_text").eq("key", f"desc_{menu_key}").execute()
-        if res.data and res.data[0].get('val_text'):
-            txt = str(res.data[0]['val_text']).strip()
+        res = supabase.table("settings").select("val_text").eq(
+            "key", f"desc_{menu_key}"
+        ).execute()
+
+        if res.data and res.data[0].get("val_text"):
+            txt = str(res.data[0]["val_text"]).strip()
             if txt:
-                MENU_DESC_CACHE[menu_key] = (now, txt)
+                SETTINGS_CACHE[cache_key] = (txt, now)
                 return txt
+
     except Exception as e:
-        print(f"Get description error: {e}")
-    MENU_DESC_CACHE[menu_key] = (now, default_text)
+        logger.warning("Get description error for %s: %s", menu_key, e)
+
+    SETTINGS_CACHE[cache_key] = (default_text, now)
     return default_text
 
-def set_menu_description(menu_key, text):
-    try:
-        clean_text = str(text).strip()
-        supabase.table("settings").upsert({"key": f"desc_{menu_key}", "val_text": clean_text}).execute()
-        MENU_DESC_CACHE[menu_key] = (time.time(), clean_text)
-    except Exception as e:
-        print(f"Error setting description: {e}")
 
-def get_user_level(user_id, user_data=None):
-    u = user_data if user_data is not None else get_user(user_id)
+def set_menu_description(menu_key, text):
+    clean_text = str(text).strip()
+
+    try:
+        supabase.table("settings").upsert({
+            "key": f"desc_{menu_key}",
+            "val_text": clean_text
+        }).execute()
+
+        SETTINGS_CACHE[f"desc:{menu_key}"] = (clean_text, time.time())
+
+    except Exception as e:
+        logger.warning("Error setting description for %s: %s", menu_key, e)
+
+
+def get_user_level(user_id):
+    u = get_user(user_id)
     if u and u.get('is_reseller') == 1:
         return {"title": "🕶️ وكيل معتمد", "discount": 0.08}
     spent = float(u['total_spent']) if u and 'total_spent' in u and u['total_spent'] else 0.0
@@ -789,9 +875,9 @@ def send_order_confirmation_screen(chat_id):
     )
     bot.send_message(chat_id, text_confirm, reply_markup=markup_confirm, parse_mode="Markdown")
 
-def register_user_if_new(user_id, first_name, username, referrer_id=None):
+def register_user_if_new(user_id, first_name, username, referrer_id=None, existing_user=None):
     try:
-        u = get_user(user_id)
+        u = existing_user if existing_user is not None else get_user(user_id)
         safe_username = username if username else "لا يوجد"
         safe_name = str(first_name) if first_name else "بدون اسم"
 
@@ -841,7 +927,7 @@ def register_user_if_new(user_id, first_name, username, referrer_id=None):
                         )
                     except Exception:
                         pass
-            return user_data
+            return True
         else:
             try:
                 supabase.table("users").update({
@@ -850,39 +936,37 @@ def register_user_if_new(user_id, first_name, username, referrer_id=None):
                 }).eq("user_id", user_id).execute()
             except Exception:
                 pass
-            return u
     except Exception as e:
         print(f"Register user exception: {e}")
-    return None
-
-# ==========================================
-# ⚡ Cache لفحص الاشتراك لتسريع الأزرار
-# ==========================================
-SUB_CACHE = {}
-SUB_CACHE_TTL = 5 * 60  # 5 دقائق
+    return False
 
 def check_sub(user_id):
+    """فحص الاشتراك مع Cache لمدة 5 دقائق لتقليل طلبات Telegram."""
+    _cleanup_runtime_caches()
     now = time.time()
-    cached = SUB_CACHE.get(user_id)
 
+    cached = SUB_CACHE.get(user_id)
     if cached:
         result, saved_time = cached
         if now - saved_time < SUB_CACHE_TTL:
             return result
 
     result = True
+
     for ch in CHANNELS:
         try:
             member = bot.get_chat_member(ch, user_id)
-            if member.status not in ['member', 'administrator', 'creator']:
+            if member.status not in ("member", "administrator", "creator"):
                 result = False
                 break
         except Exception as e:
-            print(f"Subscription check error: {e}")
+            logger.warning("Subscription check failed for %s / %s: %s", user_id, ch, e)
+            # نفس سلوك النسخة الأصلية: فشل الاستعلام لا يمنع المستخدم.
             continue
 
     SUB_CACHE[user_id] = (result, now)
     return result
+
 
 def send_proof_to_channel(user_id, order_id, service_name, quantity=1, api_id="خدمة مباشرة"):
     try:
@@ -1009,20 +1093,22 @@ def auto_check_orders_and_notifications():
 
 threading.Thread(target=auto_check_orders_and_notifications, daemon=True).start()
 
-ORDERS_COUNT_CACHE = {"value": 0, "time": 0}
-ORDERS_COUNT_CACHE_TTL = 60  # ثانية
-
 def get_total_completed_orders_count(force_refresh=False):
+    """Cache لعدد الطلبات لتجنب COUNT query مع كل فتح للقائمة."""
     now = time.time()
     if not force_refresh and now - ORDERS_COUNT_CACHE["time"] < ORDERS_COUNT_CACHE_TTL:
         return ORDERS_COUNT_CACHE["value"]
+
     try:
         res = supabase.table("user_orders").select("order_id", count="exact", head=True).execute()
         value = res.count if res.count is not None else 0
-        ORDERS_COUNT_CACHE.update({"value": value, "time": now})
-        return value
-    except Exception:
-        return ORDERS_COUNT_CACHE["value"]
+    except Exception as e:
+        print(f"Orders count error: {e}")
+        value = 0
+
+    ORDERS_COUNT_CACHE["value"] = value
+    ORDERS_COUNT_CACHE["time"] = now
+    return value
 
 def recharge_points_menu(chat_id, message_id):
     text = (
@@ -1091,32 +1177,50 @@ load_manual_services_from_supabase_table()
 
 
 def main_menu(chat_id, message_id=None, user_data=None):
-    # جلب المستخدم مرة واحدة فقط بدل استعلامات مكررة
-    if user_data is None:
-        user_data = get_user(chat_id)
+    # جلب المستخدم مرة واحدة فقط عند الحاجة
+    user = user_data if user_data is not None else get_user(chat_id)
 
-    if user_data and bool(user_data.get('is_banned', 0)):
+    if user and bool(user.get('is_banned', 0)):
         bot.send_message(chat_id, "❌ أنت محظور من استخدام البوت.")
         return
 
     if is_maintenance() and chat_id != ADMIN_ID:
-        bot.send_message(chat_id, "🛠️ **البوت قيد الصيانة والتحديثات حالياً.**\nسنكون معكم قريباً بحلّة جديدة! 🌟", parse_mode="Markdown")
+        bot.send_message(
+            chat_id,
+            "🛠️ **البوت قيد الصيانة والتحديثات حالياً.**\nسنكون معكم قريباً بحلّة جديدة! 🌟",
+            parse_mode="Markdown"
+        )
         return
 
-    points = get_points(chat_id, user_data)
-    level_info = get_user_level(chat_id, user_data)
-    user_title = level_info['title']
-    discount_pct = int(level_info['discount'] * 100)
-    
+    # الرصيد والرتبة من نفس صف المستخدم، بدون استعلامين إضافيين
+    points = round(float(user.get('points', 0) or 0), 2) if user else 0.0
+
+    if user and user.get('is_reseller') == 1:
+        user_title = "🕶️ وكيل معتمد"
+        discount_pct = 8
+    else:
+        spent = float(user.get('total_spent', 0) or 0) if user else 0.0
+        if spent >= 300:
+            user_title, discount_pct = "🏆 VIP", 5
+        elif spent >= 200:
+            user_title, discount_pct = "💎 تاجر محترف", 4
+        elif spent >= 150:
+            user_title, discount_pct = "🥇 تاجر جيد", 3
+        elif spent >= 100:
+            user_title, discount_pct = "🥈 تاجر", 2
+        elif spent >= 50:
+            user_title, discount_pct = "🥉 تاجر مبتدئ", 1
+        else:
+            user_title, discount_pct = "👤 مستخدم عادي", 0
+
     status_text = f"{user_title} (خصم {discount_pct}%)" if discount_pct > 0 else user_title
 
     cart_count = len(user_carts.get(chat_id, []))
     cart_btn_text = f"🛒 سلة الشراء ({cart_count})" if cart_count > 0 else "🛒 سلة الشراء"
-
     total_orders_count = get_total_completed_orders_count()
 
     markup = types.InlineKeyboardMarkup(row_width=2)
-    
+
     if not is_item_in_maintenance('our_services') or chat_id == ADMIN_ID:
         markup.add(types.InlineKeyboardButton("🛍️ خدماتنا", callback_data="our_services", style=get_item_style('our_services')))
 
@@ -1139,7 +1243,7 @@ def main_menu(chat_id, message_id=None, user_data=None):
     markup.add(
         types.InlineKeyboardButton("💎 شحن نقاط", callback_data="menu_recharge_points", style=get_item_style("menu_recharge_points"))
     )
-    
+
     if not is_item_in_maintenance('support_btn') or chat_id == ADMIN_ID:
         markup.add(
             types.InlineKeyboardButton("👨‍💻 الدعم ووكلاء الشحن المعتمدين", callback_data="menu_support_agents", style=get_item_style("support_and_agents"))
@@ -1147,7 +1251,8 @@ def main_menu(chat_id, message_id=None, user_data=None):
 
     markup.add(
         types.InlineKeyboardButton(f"🛡️ طلبات أنجزناها {total_orders_count} طلب", callback_data="completed_orders_info", style=get_item_style("completed_orders_info"))
-    )                
+    )
+
     if chat_id == ADMIN_ID:
         markup.add(types.InlineKeyboardButton("⚙️ لوحة الإدارة", callback_data="admin_panel", style=get_item_style("admin_panel")))
 
@@ -1158,7 +1263,7 @@ def main_menu(chat_id, message_id=None, user_data=None):
         f"🎖️ رتبتك بالخدمات: <b>{status_text}</b>\n\n"
         f"تفضل وأختر طلبك:"
     )
-    
+
     if message_id:
         try:
             bot.edit_message_text(text, chat_id, message_id, reply_markup=markup, parse_mode="HTML")
@@ -1168,101 +1273,10 @@ def main_menu(chat_id, message_id=None, user_data=None):
         bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML")
 
 
-def show_user_account_info(chat_id, message_id):
-    u = get_user(chat_id)
-    if not u:
-        return
-
-    total_recharged = u.get('total_recharged', 0.0) or 0.0
-    total_spent = u.get('total_spent', 0.0) or 0.0
-    points = u.get('points', 0.0) or 0.0
-    level_info = get_user_level(chat_id)
-
-    invites_count = 0
-    try:
-        res_inv = supabase.table("users").select("user_id", count="exact", head=True).eq("referrer", str(chat_id)).execute()
-        invites_count = res_inv.count if res_inv.count is not None else 0
-    except Exception:
-        pass
-
-    total_orders_num = 0
-    completed_orders_num = 0
-    pending_orders_num = 0
-    try:
-        res_all_ord = supabase.table("user_orders").select("status").eq("user_id", chat_id).execute()
-        user_ords = res_all_ord.data if res_all_ord.data else []
-        total_orders_num = len(user_ords)
-        completed_orders_num = sum(1 for o in user_ords if "مكتمل" in str(o.get('status', '')))
-        pending_orders_num = sum(1 for o in user_ords if "قيد" in str(o.get('status', '')))
-    except Exception:
-        pass
-
-    next_rank_text = "أنت في أعلى رتبة حالياً 🏆"
-    if u.get('is_reseller') != 1:
-        spent_val = float(total_spent)
-        if spent_val < 50:
-            rem = round(50 - spent_val, 2)
-            next_rank_text = f"متبقي `{rem}` نقطة إنفاق للوصول إلى رتبة (تاجر مبتدئ 🥉)"
-        elif spent_val < 100:
-            rem = round(100 - spent_val, 2)
-            next_rank_text = f"متبقي `{rem}` نقطة إنفاق للوصول إلى رتبة (تاجر 🥈)"
-        elif spent_val < 150:
-            rem = round(150 - spent_val, 2)
-            next_rank_text = f"متبقي `{rem}` نقطة إنفاق للوصول إلى رتبة (تاجر جيد 🥇)"
-        elif spent_val < 200:
-            rem = round(200 - spent_val, 2)
-            next_rank_text = f"متبقي `{rem}` نقطة إنفاق للوصول إلى رتبة (تاجر محترف 💎)"
-        elif spent_val < 300:
-            rem = round(300 - spent_val, 2)
-            next_rank_text = f"متبقي `{rem}` نقطة إنفاق للوصول إلى رتبة (VIP 🏆)"
-        else:
-            next_rank_text = "أنت مؤهل لتصبح (وكيل معتمد 🕶️)! تواصل مع الدعم."
-
-    text = (
-        f"👤 **ملف حسابك والإحصائيات الشخصية:**\n"
-        f"━━━━━━━━━━━━━━━━━━━\n"
-        f"🆔 الآيدي: `{chat_id}`\n"
-        f"🎖️ الرتبة الحالية: **{level_info['title']}**\n"
-        f"📈 **التقدم للرتبة التالية:**\n{next_rank_text}\n\n"
-        f"💰 الرصيد الحالي: `{points}` نقطة\n"
-        f"💳 إجمالي ما شحنته: `{total_recharged}` نقطة\n"
-        f"🛍️ إجمالي ما صرفته: `{total_spent}` نقطة\n"
-        f"👥 عدد الأشخاص المدعوين: `{invites_count}` شخص\n\n"
-        f"📊 **ملخص نشاطك العام:**\n"
-        f"• إجمالي الطلبات: `{total_orders_num}`\n"
-        f"• الطلبات المكتملة: `{completed_orders_num}` ✅\n"
-        f"• الطلبات قيد التنفيذ: `{pending_orders_num}` ⏳\n"
-        f"*(للاطلاع على تفاصيل وسجل الطلبات الكامل، يرجى استخدام زر 'طلباتي والتتبع الذكي' في القائمة الرئيسية)*"
-    )
-
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    markup.add(
-        types.InlineKeyboardButton("🔙 العودة للقائمة الرئيسية", callback_data="start", style=get_item_style("start"))
-    )
-
-    try:
-        bot.edit_message_text(text, chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
-    except Exception:
-        bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
-
-def update_menu_safely(bot_inst, chat_id, message_id, menu_key, markup_kb):
-    text_to_show = get_menu_description(menu_key, "")
-    if not text_to_show:
-        text_to_show = "📌 **اختر الخدمة أو الفئة المطلوبة:**"
-    try:
-        bot_inst.edit_message_text(text_to_show, chat_id, message_id, reply_markup=markup_kb, parse_mode="Markdown")
-    except Exception:
-        try:
-            bot_inst.edit_message_text(text_to_show, chat_id, message_id, reply_markup=markup_kb)
-        except Exception as e:
-            print(f"Safe update menu error: {e}")
-
-# ==========================================
-# دالة معالجة الأزرار الموحدة
-# ==========================================
 @bot.callback_query_handler(func=lambda call: True)
 def query(call):
     try:
+        _cleanup_runtime_caches()
         chat_id = call.message.chat.id
         message_id = call.message.message_id
         data = call.data
@@ -3885,8 +3899,13 @@ def admin_process_transfer_passcode_final(message):
 
 @bot.message_handler(commands=['start', 'redeem', 'admin'])
 def handle_commands(message):
+    _cleanup_runtime_caches()
     chat_id = message.chat.id
     text = message.text
+
+    existing_user = get_user(chat_id)
+    if existing_user and bool(existing_user.get('is_banned', 0)):
+        return
 
     if text.startswith('/start'):
         args = text.split()
@@ -3902,14 +3921,9 @@ def handle_commands(message):
         try:
             first_name = message.from_user.first_name or "بدون اسم"
             username = message.from_user.username or "لا يوجد"
-            start_user_data = register_user_if_new(chat_id, first_name, username, referrer_id)
+            register_user_if_new(chat_id, first_name, username, referrer_id, existing_user)
         except Exception as e:
             print(f"Error registering user in handler: {e}")
-            start_user_data = None
-
-        # منع المستخدم المحظور قبل فحص الاشتراك لتجنب طلبات إضافية
-        if start_user_data and bool(start_user_data.get('is_banned', 0)):
-            return
 
         if chat_id != ADMIN_ID:
             try:
@@ -3923,11 +3937,19 @@ def handle_commands(message):
             except Exception as e:
                 print(f"Error checking subscription: {e}")
 
-        main_menu(chat_id, user_data=start_user_data)
+        main_menu(chat_id, user_data=(existing_user if existing_user is not None else get_user(chat_id)))
 
     elif text.startswith('/admin') and chat_id == ADMIN_ID:
         admin_panel_shortcut(chat_id)
 
 if __name__ == '__main__':
     print("Bot is running...")
-    bot.infinity_polling(skip_pending=True)
+    while True:
+        try:
+            bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=30)
+        except KeyboardInterrupt:
+            print("Bot stopped.")
+            break
+        except Exception as e:
+            logger.exception("Polling crashed: %s", e)
+            time.sleep(5)
