@@ -686,6 +686,7 @@ def admin_panel_shortcut(chat_id, message_id=None):
         types.InlineKeyboardButton("👥 إدارة المستخدمين والوكلاء", callback_data='adm_menu_users', style=get_item_style('adm_menu_users')),
         types.InlineKeyboardButton("🎟️ الكروت والمسابقات", callback_data='adm_menu_promos', style=get_item_style('adm_menu_promos')),
         types.InlineKeyboardButton("⚙️ النظام والإذاعة", callback_data='adm_menu_system', style=get_item_style('adm_menu_system')),
+        types.InlineKeyboardButton("🎛️ ترتيب أزرار البوت", callback_data='layout_admin', style=get_item_style('layout_admin')),
         types.InlineKeyboardButton("🛠️ صيانة الأزرار والأقسام الشاملة", callback_data='adm_maint_control_menu', style=get_item_style('adm_maint_control_menu')),
         types.InlineKeyboardButton("🎨 تعديل ألوان الأقسام والخدمات", callback_data='adm_select_item_to_recolor', style=get_item_style('adm_select_item_to_recolor')),
         types.InlineKeyboardButton("📱 لوحة تحكم آسيا (أدمن)", callback_data='admin_asiacell_panel', style=get_item_style('admin_asiacell_panel')),
@@ -1091,7 +1092,6 @@ load_manual_services_from_supabase_table()
 
 
 def main_menu(chat_id, message_id=None, user_data=None):
-    # جلب المستخدم مرة واحدة فقط بدل استعلامات مكررة
     if user_data is None:
         user_data = get_user(chat_id)
 
@@ -1150,6 +1150,9 @@ def main_menu(chat_id, message_id=None, user_data=None):
     )                
     if chat_id == ADMIN_ID:
         markup.add(types.InlineKeyboardButton("⚙️ لوحة الإدارة", callback_data="admin_panel", style=get_item_style("admin_panel")))
+
+    _layout_snapshot("main", markup)
+    _apply_button_layout("main", markup)
 
     text = (
         f"أهلاً وسهلاً بك في بوت WhiteX للخدمات، فيه كل ما تحتاجه من الخدمات الإلكترونية ✨\n\n"
@@ -1245,7 +1248,223 @@ def show_user_account_info(chat_id, message_id):
     except Exception:
         bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
 
+# ==========================================
+# 🎛️ مدير ترتيب أزرار البوت - خفيف ومستقر
+# ==========================================
+BUTTON_LAYOUTS_KEY = "button_layouts_v2"
+_BUTTON_LAYOUTS_CACHE = None
+
+
+def _load_button_layouts():
+    global _BUTTON_LAYOUTS_CACHE
+    if _BUTTON_LAYOUTS_CACHE is not None:
+        return _BUTTON_LAYOUTS_CACHE
+    try:
+        res = supabase.table("settings").select("val_text").eq("key", BUTTON_LAYOUTS_KEY).execute()
+        raw = res.data[0].get("val_text") if res.data else ""
+        data = json.loads(raw) if raw else {}
+        _BUTTON_LAYOUTS_CACHE = data if isinstance(data, dict) else {}
+    except Exception as e:
+        print(f"Button layouts load error: {e}")
+        _BUTTON_LAYOUTS_CACHE = {}
+    return _BUTTON_LAYOUTS_CACHE
+
+
+def _save_button_layouts(data):
+    global _BUTTON_LAYOUTS_CACHE
+    supabase.table("settings").upsert({
+        "key": BUTTON_LAYOUTS_KEY,
+        "val_text": json.dumps(data, ensure_ascii=False)
+    }).execute()
+    _BUTTON_LAYOUTS_CACHE = data
+
+
+def _layout_snapshot(menu_key, markup):
+    """يحفظ أسماء/callbacks القائمة الحالية مع إبقاء إعدادات الأدمن."""
+    key = str(menu_key)
+    items = []
+    for row in getattr(markup, "keyboard", []):
+        for btn in row:
+            cb = getattr(btn, "callback_data", None)
+            if cb:
+                items.append({"callback": str(cb), "text": str(getattr(btn, "text", "زر"))})
+    if not items:
+        return
+    data = dict(_load_button_layouts())
+    old = dict(data.get(key, {}))
+    old_buttons = old.get("buttons", [])
+    old["buttons"] = items
+    if not old.get("order"):
+        old["order"] = [x["callback"] for x in items]
+    data[key] = old
+    cached_old = _load_button_layouts().get(key, {})
+    if cached_old.get("buttons") == items and cached_old.get("order") == old.get("order") and cached_old.get("hidden", []) == old.get("hidden", []) and cached_old.get("columns", 1) == old.get("columns", 1):
+        return
+    try:
+        _save_button_layouts(data)
+    except Exception as e:
+        print(f"Button layout snapshot save error: {e}")
+
+
+def _apply_button_layout(menu_key, markup):
+    """يطبق ترتيب الأدمن على markup موجود أصلًا بدون تغيير callbacks."""
+    cfg = _load_button_layouts().get(str(menu_key), {})
+    order = [str(x) for x in cfg.get("order", [])]
+    hidden = {str(x) for x in cfg.get("hidden", [])}
+    if not order and not hidden:
+        return markup
+
+    all_buttons = [b for row in getattr(markup, "keyboard", []) for b in row]
+    by_cb = {str(getattr(b, "callback_data", "")): b for b in all_buttons if getattr(b, "callback_data", None)}
+    result = []
+    used = set()
+    for cb in order:
+        b = by_cb.get(cb)
+        if b is not None and cb not in hidden:
+            result.append(b)
+            used.add(cb)
+    for b in all_buttons:
+        cb = getattr(b, "callback_data", None)
+        if not cb:
+            result.append(b)
+            continue
+        cb = str(cb)
+        if cb not in used and cb not in hidden:
+            result.append(b)
+            used.add(cb)
+
+    columns = max(1, min(int(cfg.get("columns", 1) or 1), 3))
+    markup.keyboard = [result[i:i + columns] for i in range(0, len(result), columns)]
+    return markup
+
+
+def _layout_targets():
+    data = _load_button_layouts()
+    return [(k, v) for k, v in data.items() if isinstance(v, dict) and v.get("buttons")]
+
+
+def _layout_title(menu_key, cfg):
+    labels = {x.get("callback"): x.get("text", "زر") for x in cfg.get("buttons", [])}
+    return labels
+
+
+def _show_layout_targets(chat_id, message_id=None):
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(types.InlineKeyboardButton("🏠 الواجهة الرئيسية", callback_data="layout_menu|main"))
+    for key, cfg in _layout_targets():
+        if key == "main":
+            continue
+        buttons = cfg.get("buttons", [])
+        title = buttons[0].get("text", key) if buttons else key
+        markup.add(types.InlineKeyboardButton(f"📂 {title[:35]}", callback_data=f"layout_menu|{key}"))
+    markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel"))
+    text = "🎛️ **مدير ترتيب أزرار البوت**\n\nاختر الواجهة التي تريد ترتيب أزرارها:\n\n📏 تقدر تجعل الزر منفرد أو تخلي 2 أو 3 أزرار بالصف."
+    if message_id:
+        try:
+            bot.edit_message_text(text, chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+        except Exception:
+            bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+    else:
+        bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+
+
+def _show_layout_editor(chat_id, message_id, menu_key):
+    data = _load_button_layouts()
+    cfg = data.get(menu_key)
+    if not cfg:
+        bot.send_message(chat_id, "❌ هذه الواجهة لم تُسجل بعد. افتحها من البوت مرة واحدة ثم ارجع لمدير الترتيب.")
+        return
+    labels = _layout_title(menu_key, cfg)
+    order = list(cfg.get("order", []))
+    hidden = set(cfg.get("hidden", []))
+    columns = int(cfg.get("columns", 1) or 1)
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for i, cb in enumerate(order, 1):
+        label = labels.get(cb, cb)
+        state = "🚫" if cb in hidden else "✅"
+        markup.add(types.InlineKeyboardButton(f"{i}. {state} {label[:40]}", callback_data=f"layout_pick|{menu_key}|{i-1}"))
+    markup.row(
+        types.InlineKeyboardButton("1️⃣ زر واحد", callback_data=f"layout_cols|{menu_key}|1"),
+        types.InlineKeyboardButton("2️⃣ زرين", callback_data=f"layout_cols|{menu_key}|2"),
+        types.InlineKeyboardButton("3️⃣ أزرار", callback_data=f"layout_cols|{menu_key}|3")
+    )
+    markup.row(
+        types.InlineKeyboardButton("♻️ إعادة ضبط", callback_data=f"layout_reset|{menu_key}"),
+        types.InlineKeyboardButton("🔙 الواجهات", callback_data="layout_admin")
+    )
+    title = "🏠 الواجهة الرئيسية" if menu_key == "main" else f"📂 {menu_key}"
+    text = f"🎛️ **ترتيب: {title}**\n\nاضغط على الزر للدخول إلى تحكمه.\n📐 عدد الأزرار بالصف حالياً: `{columns}`"
+    try:
+        bot.edit_message_text(text, chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+    except Exception:
+        bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+
+
+def _show_layout_item(call, menu_key, index):
+    data = _load_button_layouts(); cfg = data.get(menu_key, {})
+    order = list(cfg.get("order", [])); buttons = cfg.get("buttons", [])
+    if index < 0 or index >= len(order):
+        bot.answer_callback_query(call.id, "❌ الزر غير موجود", show_alert=True); return
+    labels = {x.get("callback"): x.get("text", "زر") for x in buttons}
+    cb = order[index]
+    hidden = set(cfg.get("hidden", []))
+    state = "إظهار" if cb in hidden else "إخفاء"
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    if index > 0:
+        kb.add(types.InlineKeyboardButton("⬆️ تقديم", callback_data=f"layout_move|{menu_key}|{index}|up"))
+    if index < len(order)-1:
+        kb.add(types.InlineKeyboardButton("⬇️ تأخير", callback_data=f"layout_move|{menu_key}|{index}|down"))
+    kb.add(types.InlineKeyboardButton(f"👁️ {state}", callback_data=f"layout_hide|{menu_key}|{index}"))
+    kb.add(types.InlineKeyboardButton("🔙 رجوع للترتيب", callback_data=f"layout_menu|{menu_key}"))
+    bot.edit_message_text(
+        f"🎛️ **التحكم بالزر**\n\n🔘 {labels.get(cb, cb)}\n📍 ترتيبه: `{index+1}`",
+        call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown"
+    )
+
+
+def _handle_layout_callback(call):
+    if call.from_user.id != ADMIN_ID:
+        bot.answer_callback_query(call.id, "❌ غير مسموح", show_alert=True); return True
+    data = call.data
+    if data == "layout_admin":
+        _show_layout_targets(call.message.chat.id, call.message.message_id); return True
+    if data.startswith("layout_menu|"):
+        key = data.split("|", 1)[1]
+        _show_layout_editor(call.message.chat.id, call.message.message_id, key); return True
+    if data.startswith("layout_pick|"):
+        _, key, idx = data.split("|", 2); _show_layout_item(call, key, int(idx)); return True
+    if data.startswith("layout_cols|"):
+        _, key, cols = data.split("|", 2); cfg = dict(_load_button_layouts().get(key, {})); cfg["columns"] = int(cols)
+        all_data = dict(_load_button_layouts()); all_data[key] = cfg; _save_button_layouts(all_data)
+        bot.answer_callback_query(call.id, "✅ تم تغيير عدد الأزرار بالصف")
+        _show_layout_editor(call.message.chat.id, call.message.message_id, key); return True
+    if data.startswith("layout_move|"):
+        _, key, idx, direction = data.split("|", 3); idx = int(idx)
+        all_data = dict(_load_button_layouts()); cfg = dict(all_data.get(key, {})); order = list(cfg.get("order", []))
+        j = idx - 1 if direction == "up" else idx + 1
+        if 0 <= idx < len(order) and 0 <= j < len(order): order[idx], order[j] = order[j], order[idx]
+        cfg["order"] = order; all_data[key] = cfg; _save_button_layouts(all_data)
+        bot.answer_callback_query(call.id, "✅ تم تغيير مكان الزر")
+        _show_layout_editor(call.message.chat.id, call.message.message_id, key); return True
+    if data.startswith("layout_hide|"):
+        _, key, idx = data.split("|", 2); idx = int(idx)
+        all_data = dict(_load_button_layouts()); cfg = dict(all_data.get(key, {})); order = list(cfg.get("order", [])); hidden = set(cfg.get("hidden", []))
+        if 0 <= idx < len(order):
+            cb = order[idx]; hidden.remove(cb) if cb in hidden else hidden.add(cb)
+        cfg["hidden"] = list(hidden); all_data[key] = cfg; _save_button_layouts(all_data)
+        bot.answer_callback_query(call.id, "✅ تم تحديث ظهور الزر")
+        _show_layout_editor(call.message.chat.id, call.message.message_id, key); return True
+    if data.startswith("layout_reset|"):
+        key = data.split("|", 1)[1]; all_data = dict(_load_button_layouts()); cfg = dict(all_data.get(key, {}))
+        cfg["order"] = [x.get("callback") for x in cfg.get("buttons", []) if x.get("callback")]; cfg["hidden"] = []; cfg["columns"] = 1
+        all_data[key] = cfg; _save_button_layouts(all_data)
+        bot.answer_callback_query(call.id, "♻️ تم إرجاع الترتيب الافتراضي")
+        _show_layout_editor(call.message.chat.id, call.message.message_id, key); return True
+    return False
+
 def update_menu_safely(bot_inst, chat_id, message_id, menu_key, markup_kb):
+    _layout_snapshot(menu_key, markup_kb)
+    _apply_button_layout(menu_key, markup_kb)
     text_to_show = get_menu_description(menu_key, "")
     if not text_to_show:
         text_to_show = "📌 **اختر الخدمة أو الفئة المطلوبة:**"
@@ -1266,6 +1485,10 @@ def query(call):
         chat_id = call.message.chat.id
         message_id = call.message.message_id
         data = call.data
+
+        if data.startswith("layout_"):
+            if _handle_layout_callback(call):
+                return
 
         try:
             bot.answer_callback_query(call.id)
@@ -2398,7 +2621,6 @@ def query(call):
                 
             markup = types.InlineKeyboardMarkup(row_width=1)
             
-            # 1. عرض الأقسام الفرعية التابعة لهذا القسم (إن وجدت)
             subs = SUB_CATEGORIES.get(data, [])
             for sub in subs:
                 cb_val = sub.get('callback')
@@ -2406,7 +2628,6 @@ def query(call):
                     cb_val = f"sub_{cb_val}"
                 markup.add(types.InlineKeyboardButton(f"📁 {sub['name']}", callback_data=cb_val, style=get_item_style(cb_val)))
 
-            # 2. عرض الخدمات المباشرة التي تنتمي لهذا القسم مباشرة بدون قسم فرعي
             found_items = False
             for k, v in SERVICES.items():
                 if v.get('category') == data and not v.get('subcat'):
@@ -3237,7 +3458,6 @@ def step_add_category_name(message):
     cat_key = data['new_cat_key']
     CATEGORIES[cat_key] = cat_name
     
-    # حفظ وتحديث الأقسام الرئيسية في سوبايس لتبقى دائمة
     try:
         custom_cats_only = {k: v for k, v in CATEGORIES.items() if k.startswith('cat_')}
         supabase.table("settings").upsert({
@@ -3265,7 +3485,6 @@ def step_subcat_name(message):
     sub_key_id = f"sub_{int(time.time())}"
     SUB_CATEGORIES[cat_key].append({'name': subcat_name, 'callback': sub_key_id})
     
-    # حفظ القاموس المحدث بالكامل في جدول settings في سوبايس لضمان استمراريته وقراءته
     try:
         supabase.table("settings").upsert({
             "key": "custom_sub_categories",
@@ -3282,7 +3501,16 @@ def step_srv_name(message):
     if chat_id not in temp_add_service:
         temp_add_service[chat_id] = {'category': 'cat_insta'}
     temp_add_service[chat_id]['name'] = message.text.strip()
-    msg = bot.send_message(chat_id, "🆔 أرسل Service ID (أو 0 لليدوي):", parse_mode="Markdown")
+    
+    markup_back = types.InlineKeyboardMarkup()
+    markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
+    
+    msg = bot.send_message(
+        chat_id, 
+        "🆔 **أرسل Service ID الخاص بالمزود (أو أرسل `0` إذا كانت الخدمة يدوية):**", 
+        parse_mode="Markdown",
+        reply_markup=markup_back
+    )
     bot.register_next_step_handler(msg, step_srv_id)
 
 def step_srv_id(message):
@@ -3295,22 +3523,27 @@ def step_srv_id(message):
         markup.add(types.InlineKeyboardButton("تخطي الوصف ⏭️", callback_data="skip_srv_desc", style=get_item_style('skip_srv_desc')))
         markup.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
         
-        msg = bot.send_message(
-            chat_id, 
-            "📝 **أرسل الآن وصف الخدمة أو التعليمات التي ستظهر للمستخدم عند الطلب:**\n*(أو اضغط على زر تخطي أدناه لتجاوز هذه الخطوة)*", 
-            parse_mode="Markdown",
-            reply_markup=markup
-        )
-        
         if s_id == 0:
+            msg = bot.send_message(
+                chat_id, 
+                "📝 **أرسل الآن رسالة التوجيه (أو التعليمات) التي ستظهر للزبون عند طلب هذه الخدمة اليدوية:**\n*(مثال: أرسل الآيدي والاسم الثلاثي بدقة)*", 
+                parse_mode="Markdown",
+                reply_markup=markup
+            )
             bot.register_next_step_handler(msg, step_manual_srv_desc_input)
         else:
+            msg = bot.send_message(
+                chat_id, 
+                "📝 **أرسل الآن وصف الخدمة أو التعليمات التي ستظهر للمستخدم عند الطلب:**\n*(أو اضغط على زر تخطي أدناه لتجاوز هذه الخطوة)*", 
+                parse_mode="Markdown",
+                reply_markup=markup
+            )
             bot.register_next_step_handler(msg, step_srv_desc_input)
             
     except ValueError:
         markup_back = types.InlineKeyboardMarkup()
         markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
-        msg = bot.send_message(chat_id, "⚠️ أدخل رقماً صحيحاً للـ ID:", reply_markup=markup_back)
+        msg = bot.send_message(chat_id, "⚠️ أدخل رقماً صحيحاً للـ ID (أو 0 لليدوي):", reply_markup=markup_back)
         bot.register_next_step_handler(msg, step_srv_id)
 
 def step_srv_desc_input(message):
@@ -3461,14 +3694,14 @@ def step_manual_srv_desc_input(message):
     chat_id = message.chat.id
     text_val = message.text.strip()
     if chat_id in temp_add_service:
-        temp_add_service[chat_id]['msg'] = text_val
+        temp_add_service[chat_id]['msg'] = text_val # حفظ رسالة التوجيه المخصصة للزبون
     
     markup_back = types.InlineKeyboardMarkup()
     markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
     
     msg = bot.send_message(
         chat_id,
-        "✍️ **أدخل الكمية والسعر بهذه الصيغة المبسطة:**\n`الكمية:السعر`\n\n*مثال:*\n`1:5` (يعني قطعة واحدة بـ 5 نقاط)\nأو `100:2` (يعني 100 وحدة بـ 2 نقطة)",
+        "✍️ **أدخل الخيار اليدوي والسعر بالصيغة النصية الحرة:**\n`النص:السعر`\n\n*مثال:*\n`الاشتراك شهر: 15`\nأو `باقة أسبوعية: 5`",
         parse_mode="Markdown",
         reply_markup=markup_back
     )
@@ -3476,14 +3709,14 @@ def step_manual_srv_desc_input(message):
 
 def skip_manual_srv_desc(chat_id):
     if chat_id in temp_add_service:
-        temp_add_service[chat_id]['msg'] = "🎮 **أرسل الآيدي أو المعلومات المطلوبة للخدمة:**"
+        temp_add_service[chat_id]['msg'] = "🎮 **أرسل المعلومات أو الآيدي المطلوب للخدمة:**"
     
     markup_back = types.InlineKeyboardMarkup()
     markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
     
     msg = bot.send_message(
         chat_id,
-        "✍️ **أدخل الكمية والسعر بهذه الصيغة المبسطة:**\n`الكمية:السعر`\n\n*مثال:*\n`1:5`",
+        "✍️ **أدخل الخيار اليدوي والسعر بالصيغة:**\n`النص:السعر`\n\n*مثال:*\n`الاشتراك شهر: 15`",
         parse_mode="Markdown",
         reply_markup=markup_back
     )
@@ -3504,8 +3737,8 @@ def step_manual_srv_save_final(message):
         return
     try:
         parts = text_val.split(':')
-        if len(parts) == 2:
-            qty = int(parts[0].strip())
+        if len(parts) >= 2:
+            custom_label = parts[0].strip()
             price = float(parts[1].strip())
         else:
             raise ValueError("صيغة غير صحيحة")
@@ -3515,21 +3748,19 @@ def step_manual_srv_save_final(message):
         category_val = srv.get('category')
 
         service_payload = {
-            'name': srv['name'], 
-            'btn_label': srv['name'][:30],
+            'name': f"{srv['name']} ({custom_label})", 
+            'btn_label': f"{custom_label} ({price} ن)",
             'service_id': 0, 
             'category': category_val,
             'subcat': subcat_val,
-            'msg': srv.get('msg', '🎮 **أرسل الآيدي أو المعلومات المطلوبة للخدمة اليدوية:**'), 
+            'msg': srv.get('msg', '🎮 **أرسل المعلومات أو الآيدي المطلوب:**'), 
             'price': price,
-            'qty': qty,
+            'qty': 1,
             'is_custom_tiers': False
         }
         
-        # حفظ في الذاكرة المحلية للبوت
         SERVICES[key] = service_payload
         
-        # تخزين دائم في جدول custom_services في سوبايس
         try:
             supabase.table("custom_services").upsert({
                 "service_key": key,
@@ -3540,14 +3771,13 @@ def step_manual_srv_save_final(message):
         except Exception as db_err:
             print(f"Error saving manual service to Supabase: {db_err}")
         
-        bot.send_message(chat_id, f"✅ **تمت إضافة وحفظ الخدمة اليدوية في القسم المطلوب بنجاح!**\n📦 الكمية: `{qty}`\n💰 السعر: `{price}` نقطة", parse_mode="Markdown")
+        bot.send_message(chat_id, f"✅ **تمت إضافة وحفظ الخدمة اليدوية بنجاح!**\n🏷️ الخيار: `{custom_label}`\n💰 السعر: `{price}` نقطة", parse_mode="Markdown")
         del temp_add_service[chat_id]
     except Exception as e:
         markup_back = types.InlineKeyboardMarkup()
         markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
-        msg = bot.send_message(chat_id, f"⚠️ الصيغة غير صحيحة. أرسل بالشكل `الكمية:السعر` (مثال `1:5` أو `65:1.5`):", reply_markup=markup_back)
+        msg = bot.send_message(chat_id, f"⚠️ الصيغة غير صحيحة. أرسل بالشكل `النص:السعر` (مثال `الاشتراك شهر: 15`):", reply_markup=markup_back)
         bot.register_next_step_handler(msg, step_manual_srv_save_final)
-
 
 def process_update_single_price(message, service_key):
     try:
@@ -3907,7 +4137,6 @@ def handle_commands(message):
             print(f"Error registering user in handler: {e}")
             start_user_data = None
 
-        # منع المستخدم المحظور قبل فحص الاشتراك لتجنب طلبات إضافية
         if start_user_data and bool(start_user_data.get('is_banned', 0)):
             return
 
