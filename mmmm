@@ -677,6 +677,109 @@ try:
 except Exception as e:
     print(f"Error loading deleted services: {e}")
 
+
+# ==========================================
+# 🔗 أزرار مخصصة بروابط متعددة — نسخة خفيفة
+# ==========================================
+CUSTOM_LINK_BUTTONS_KEY = "custom_link_buttons_v1"
+_CUSTOM_LINK_BUTTONS_CACHE = None
+
+def _load_custom_link_buttons():
+    global _CUSTOM_LINK_BUTTONS_CACHE
+    if _CUSTOM_LINK_BUTTONS_CACHE is not None: return _CUSTOM_LINK_BUTTONS_CACHE
+    try:
+        r=supabase.table("settings").select("val_text").eq("key",CUSTOM_LINK_BUTTONS_KEY).execute()
+        d=json.loads(r.data[0].get("val_text", "")) if r.data else []
+        _CUSTOM_LINK_BUTTONS_CACHE=d if isinstance(d,list) else []
+    except Exception as e:
+        print(f"Custom buttons load error: {e}"); _CUSTOM_LINK_BUTTONS_CACHE=[]
+    return _CUSTOM_LINK_BUTTONS_CACHE
+
+def _save_custom_link_buttons(items):
+    global _CUSTOM_LINK_BUTTONS_CACHE
+    clean=[]
+    for x in items:
+        if not isinstance(x,dict): continue
+        x=dict(x); x["id"]=str(x.get("id") or uuid.uuid4().hex[:10]); x["name"]=str(x.get("name") or "زر جديد").strip()[:60]
+        links=[]
+        for l in x.get("links",[]) if isinstance(x.get("links",[]),list) else []:
+            if isinstance(l,dict) and str(l.get("name","")).strip() and re.match(r"^https?://\S+$",str(l.get("url","")),re.I):
+                links.append({"name":str(l["name"]).strip()[:60],"url":str(l["url"]).strip()[:400]})
+        x["links"]=links; clean.append(x)
+    supabase.table("settings").upsert({"key":CUSTOM_LINK_BUTTONS_KEY,"val_text":json.dumps(clean,ensure_ascii=False)}).execute()
+    _CUSTOM_LINK_BUTTONS_CACHE=clean
+    return clean
+
+def _custom_link_item(i): return next((x for x in _load_custom_link_buttons() if str(x.get("id"))==str(i)),None)
+
+def _custom_main_markup_buttons(markup):
+    for x in _load_custom_link_buttons():
+        i=str(x.get("id"));
+        if i: markup.add(types.InlineKeyboardButton(str(x.get("name","زر جديد")),callback_data=f"custom_menu|{i}",style=get_item_style(f"custom_menu|{i}")))
+    return markup
+
+def _show_custom_link_menu(chat_id,message_id,item_id):
+    x=_custom_link_item(item_id)
+    if not x: bot.send_message(chat_id,"❌ هذا الزر لم يعد موجوداً."); return
+    kb=types.InlineKeyboardMarkup(row_width=1)
+    for l in x.get("links",[]): kb.add(types.InlineKeyboardButton(str(l.get("name","رابط"))[:60],url=str(l.get("url"))))
+    kb.add(types.InlineKeyboardButton("🔙 رجوع",callback_data="start",style=get_item_style("start")))
+    text=f"📚 **{x.get('name','شروحات البوت')}**\n\nاختر ما تريد فتحه:"
+    if not x.get("links"): text += "\n\n⚠️ لا توجد روابط مضافة حالياً."
+    try: bot.edit_message_text(text,chat_id,message_id,reply_markup=kb,parse_mode="Markdown")
+    except Exception: bot.send_message(chat_id,text,reply_markup=kb,parse_mode="Markdown")
+
+def _show_custom_buttons_admin(chat_id,message_id=None):
+    kb=types.InlineKeyboardMarkup(row_width=1)
+    for x in _load_custom_link_buttons(): kb.add(types.InlineKeyboardButton(f"🔗 {str(x.get('name','زر جديد'))[:45]}",callback_data=f"custom_admin|{x.get('id')}"))
+    kb.add(types.InlineKeyboardButton("➕ إضافة زر جديد",callback_data="custom_add"),types.InlineKeyboardButton("🔙 لوحة الإدارة",callback_data="admin_panel"))
+    text="🔗 **الأزرار المخصصة**\n\nأضف زرًا للواجهة الرئيسية، ثم أضف داخله قنوات أو فيديوهات أو أي رابط HTTPS."
+    if message_id:
+        try: bot.edit_message_text(text,chat_id,message_id,reply_markup=kb,parse_mode="Markdown")
+        except Exception: bot.send_message(chat_id,text,reply_markup=kb,parse_mode="Markdown")
+    else: bot.send_message(chat_id,text,reply_markup=kb,parse_mode="Markdown")
+
+def _show_custom_admin_editor(call,item_id):
+    x=_custom_link_item(item_id)
+    if not x: bot.answer_callback_query(call.id,"❌ الزر غير موجود",show_alert=True); return
+    kb=types.InlineKeyboardMarkup(row_width=1)
+    for i,l in enumerate(x.get("links",[])): kb.add(types.InlineKeyboardButton(f"🗑️ {i+1}. {str(l.get('name','رابط'))[:45]}",callback_data=f"custom_link_del|{item_id}|{i}"))
+    kb.add(types.InlineKeyboardButton("➕ إضافة رابط",callback_data=f"custom_link_add|{item_id}"),types.InlineKeyboardButton("🗑️ حذف الزر",callback_data=f"custom_del|{item_id}"),types.InlineKeyboardButton("🔙 رجوع",callback_data="custom_manage"))
+    bot.edit_message_text(f"🔗 **{x.get('name','زر جديد')}**\n\nعدد الروابط: `{len(x.get('links',[]))}`",call.message.chat.id,call.message.message_id,reply_markup=kb,parse_mode="Markdown")
+
+def _custom_start_add(call):
+    msg=bot.send_message(call.message.chat.id,"✏️ أرسل اسم الزر:"); bot.register_next_step_handler(msg,process_custom_parent_name)
+
+def process_custom_parent_name(m):
+    if m.from_user.id!=ADMIN_ID:return
+    name=(m.text or "").strip()
+    if not name or len(name)>60:
+        msg=bot.send_message(m.chat.id,"❌ الاسم غير صالح. أرسله من جديد."); bot.register_next_step_handler(msg,process_custom_parent_name); return
+    x={"id":uuid.uuid4().hex[:10],"name":name,"links":[]}; _save_custom_link_buttons(_load_custom_link_buttons()+[x])
+    bot.send_message(m.chat.id,f"✅ تم إنشاء **{name}**. أضف الروابط من هنا:",reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("➕ إضافة رابط",callback_data=f"custom_link_add|{x['id']}"),types.InlineKeyboardButton("🔙 رجوع",callback_data="custom_manage")),parse_mode="Markdown")
+
+def _custom_start_add_link(call,item_id):
+    if not _custom_link_item(item_id): bot.answer_callback_query(call.id,"❌ الزر غير موجود",show_alert=True); return
+    msg=bot.send_message(call.message.chat.id,"✏️ أرسل اسم الرابط:"); bot.register_next_step_handler(msg,process_custom_link_name,item_id)
+
+def process_custom_link_name(m,item_id):
+    if m.from_user.id!=ADMIN_ID:return
+    name=(m.text or "").strip()
+    if not name or len(name)>60:
+        msg=bot.send_message(m.chat.id,"❌ الاسم غير صالح. أرسله من جديد."); bot.register_next_step_handler(msg,process_custom_link_name,item_id); return
+    msg=bot.send_message(m.chat.id,"🔗 أرسل الرابط كاملًا ويجب أن يبدأ بـ https://"); bot.register_next_step_handler(msg,process_custom_link_url,item_id,name)
+
+def process_custom_link_url(m,item_id,name):
+    if m.from_user.id!=ADMIN_ID:return
+    url=(m.text or "").strip()
+    if not re.match(r"^https?://\S+$",url,re.I):
+        msg=bot.send_message(m.chat.id,"❌ الرابط غير صالح."); bot.register_next_step_handler(msg,process_custom_link_url,item_id,name); return
+    items=_load_custom_link_buttons(); x=_custom_link_item(item_id)
+    if not x: bot.send_message(m.chat.id,"❌ الزر غير موجود."); return
+    x.setdefault("links",[]).append({"name":name,"url":url}); _save_custom_link_buttons(items)
+    bot.send_message(m.chat.id,"✅ تمت إضافة الرابط.")
+
+
 def admin_panel_shortcut(chat_id, message_id=None):
     m_status = "مفعل 🛠️" if is_maintenance() else "معطل 🟢"
     markup = types.InlineKeyboardMarkup(row_width=2)
@@ -687,6 +790,7 @@ def admin_panel_shortcut(chat_id, message_id=None):
         types.InlineKeyboardButton("🎟️ الكروت والمسابقات", callback_data='adm_menu_promos', style=get_item_style('adm_menu_promos')),
         types.InlineKeyboardButton("⚙️ النظام والإذاعة", callback_data='adm_menu_system', style=get_item_style('adm_menu_system')),
         types.InlineKeyboardButton("🎛️ ترتيب أزرار البوت", callback_data='layout_admin', style=get_item_style('layout_admin')),
+        types.InlineKeyboardButton("🔗 إضافة/إدارة زر جديد", callback_data='custom_manage', style=get_item_style('custom_manage')),
         types.InlineKeyboardButton("🛠️ صيانة الأزرار والأقسام الشاملة", callback_data='adm_maint_control_menu', style=get_item_style('adm_maint_control_menu')),
         types.InlineKeyboardButton("🎨 تعديل ألوان الأقسام والخدمات", callback_data='adm_select_item_to_recolor', style=get_item_style('adm_select_item_to_recolor')),
         types.InlineKeyboardButton("📱 لوحة تحكم آسيا (أدمن)", callback_data='admin_asiacell_panel', style=get_item_style('admin_asiacell_panel')),
@@ -1151,6 +1255,8 @@ def main_menu(chat_id, message_id=None, user_data=None):
     if chat_id == ADMIN_ID:
         markup.add(types.InlineKeyboardButton("⚙️ لوحة الإدارة", callback_data="admin_panel", style=get_item_style("admin_panel")))
 
+    _custom_main_markup_buttons(markup)
+
     _layout_snapshot("main", markup)
     _apply_button_layout("main", markup)
 
@@ -1445,6 +1551,7 @@ def _show_layout_editor(chat_id, message_id, menu_key):
     if not cfg:
         bot.send_message(chat_id,"❌ هذه الواجهة لا تحتوي أزرار قابلة للترتيب حالياً.")
         return
+    cfg = _normalize_layout_cfg(menu_key)
     labels=_layout_title(menu_key,cfg)
     rows=cfg.get("rows") or [[x] for x in cfg.get("order",[])]
     hidden=set(cfg.get("hidden",[]))
@@ -1464,91 +1571,515 @@ def _show_layout_editor(chat_id, message_id, menu_key):
     try: bot.edit_message_text(text,chat_id,message_id,reply_markup=markup,parse_mode="Markdown")
     except Exception: bot.send_message(chat_id,text,reply_markup=markup,parse_mode="Markdown")
 
-def _show_layout_item(call, menu_key, index):
-    data = _load_button_layouts(); cfg = data.get(menu_key, {})
-    order = list(cfg.get("order", [])); buttons = cfg.get("buttons", [])
-    if index < 0 or index >= len(order):
-        bot.answer_callback_query(call.id, "❌ الزر غير موجود", show_alert=True); return
-    labels = {x.get("callback"): x.get("text", "زر") for x in buttons}
-    cb = order[index]
-    hidden = set(cfg.get("hidden", []))
-    state = "إظهار" if cb in hidden else "إخفاء"
+def _layout_labels(cfg):
+    return {str(x.get("callback")): str(x.get("text", "زر")) for x in cfg.get("buttons", [])}
+
+
+def _layout_save_cfg(key, cfg):
+    data = dict(_load_button_layouts())
+    data[str(key)] = cfg
+    _save_button_layouts(data)
+
+
+def _normalize_layout_cfg(key):
+    """تنظيف rows/order/hidden حتى لا تبقى إعدادات قديمة متعارضة."""
+    data = dict(_load_button_layouts())
+    cfg = dict(data.get(key, {}))
+    buttons = [str(x.get("callback")) for x in cfg.get("buttons", []) if x.get("callback")]
+    live = set(buttons)
+
+    rows = []
+    seen = set()
+    for row in cfg.get("rows", []):
+        clean = []
+        for cb in row:
+            cb = str(cb)
+            if cb in live and cb not in seen:
+                clean.append(cb)
+                seen.add(cb)
+        if clean:
+            rows.append(clean)
+
+    # أي زر جديد/غير محفوظ يضاف منفرداً.
+    for cb in buttons:
+        if cb not in seen:
+            rows.append([cb])
+            seen.add(cb)
+
+    hidden = [str(x) for x in cfg.get("hidden", []) if str(x) in live]
+    cfg["rows"] = rows
+    cfg["order"] = [cb for row in rows for cb in row]
+    cfg["hidden"] = hidden
+    cfg["columns"] = max(1, min(int(cfg.get("columns", 1) or 1), 3))
+    data[key] = cfg
+    _save_button_layouts(data)
+    return cfg
+
+
+def _show_layout_item(call, menu_key, row_index):
+    """التحكم بصف/أزراره. التحريك هنا بين الصفوف، والفصل متاح للصفوف المزدوجة."""
+    cfg = _normalize_layout_cfg(menu_key)
+    rows = cfg.get("rows", [])
+    if row_index < 0 or row_index >= len(rows):
+        bot.answer_callback_query(call.id, "❌ الصف غير موجود", show_alert=True)
+        return
+
+    labels = _layout_labels(cfg)
+    row = rows[row_index]
+    row_text = " ↔️ ".join(labels.get(cb, cb) for cb in row)
+
     kb = types.InlineKeyboardMarkup(row_width=2)
-    if index > 0:
-        kb.add(types.InlineKeyboardButton("⬆️ تقديم", callback_data=f"layout_move|{menu_key}|{index}|up"))
-    if index < len(order)-1:
-        kb.add(types.InlineKeyboardButton("⬇️ تأخير", callback_data=f"layout_move|{menu_key}|{index}|down"))
-    kb.add(types.InlineKeyboardButton(f"👁️ {state}", callback_data=f"layout_hide|{menu_key}|{index}"))
-    kb.add(types.InlineKeyboardButton("🔙 رجوع للترتيب", callback_data=f"layout_menu|{menu_key}"))
+
+    if row_index > 0:
+        kb.add(types.InlineKeyboardButton(
+            "⬆️ نقل للصف السابق",
+            callback_data=f"layout_rowmove|{menu_key}|{row_index}|up"
+        ))
+
+    if row_index < len(rows) - 1:
+        kb.add(types.InlineKeyboardButton(
+            "⬇️ نقل للصف التالي",
+            callback_data=f"layout_rowmove|{menu_key}|{row_index}|down"
+        ))
+
+    if len(row) > 1:
+        kb.add(types.InlineKeyboardButton(
+            "✂️ فصل أزرار الصف",
+            callback_data=f"layout_unpair|{menu_key}|{row_index}"
+        ))
+
+    kb.add(types.InlineKeyboardButton(
+        "🔙 رجوع للترتيب",
+        callback_data=f"layout_menu|{menu_key}"
+    ))
+
     bot.edit_message_text(
-        f"🎛️ **التحكم بالزر**\n\n🔘 {labels.get(cb, cb)}\n📍 ترتيبه: `{index+1}`",
-        call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown"
+        f"🎛️ **التحكم بالصف**\n\n"
+        f"📐 {row_text}\n"
+        f"📍 رقم الصف: `{row_index + 1}`",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=kb,
+        parse_mode="Markdown"
+    )
+
+
+def _show_layout_move_buttons(call, menu_key):
+    """اختيار زر محدد ثم نقله إلى الصف السابق/التالي."""
+    cfg = _normalize_layout_cfg(menu_key)
+    labels = _layout_labels(cfg)
+
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    for row_index, row in enumerate(cfg.get("rows", [])):
+        for cb in row:
+            kb.add(types.InlineKeyboardButton(
+                f"↕️ {labels.get(cb, cb)}",
+                callback_data=f"layout_move_pick|{menu_key}|{cb}"
+            ))
+
+    kb.add(types.InlineKeyboardButton(
+        "🔙 رجوع",
+        callback_data=f"layout_menu|{menu_key}"
+    ))
+
+    bot.edit_message_text(
+        "↕️ **اختار الزر الذي تريد تحريكه:**\n\n"
+        "بعد الاختيار راح تگدر تنقله للصف السابق أو التالي.",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=kb,
+        parse_mode="Markdown"
+    )
+
+
+def _show_layout_move_controls(call, menu_key, cb):
+    cfg = _normalize_layout_cfg(menu_key)
+    rows = cfg.get("rows", [])
+    labels = _layout_labels(cfg)
+
+    row_index = next((i for i, row in enumerate(rows) if cb in row), -1)
+    if row_index < 0:
+        bot.answer_callback_query(call.id, "❌ الزر غير موجود", show_alert=True)
+        return
+
+    kb = types.InlineKeyboardMarkup(row_width=2)
+
+    if row_index > 0:
+        kb.add(types.InlineKeyboardButton(
+            "⬆️ الصف السابق",
+            callback_data=f"layout_button_move|{menu_key}|{cb}|up"
+        ))
+
+    if row_index < len(rows) - 1:
+        kb.add(types.InlineKeyboardButton(
+            "⬇️ الصف التالي",
+            callback_data=f"layout_button_move|{menu_key}|{cb}|down"
+        ))
+
+    kb.add(types.InlineKeyboardButton(
+        "🔙 اختيار زر آخر",
+        callback_data=f"layout_move_menu|{menu_key}"
+    ))
+    kb.add(types.InlineKeyboardButton(
+        "🔙 رجوع للترتيب",
+        callback_data=f"layout_menu|{menu_key}"
+    ))
+
+    bot.edit_message_text(
+        f"↕️ **تحريك الزر**\n\n"
+        f"🔘 {labels.get(cb, cb)}\n"
+        f"📍 الصف الحالي: `{row_index + 1}`",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=kb,
+        parse_mode="Markdown"
+    )
+
+
+def _move_button_between_rows(call, menu_key, cb, direction):
+    all_data = dict(_load_button_layouts())
+    cfg = dict(all_data.get(menu_key, {}))
+    rows = [list(r) for r in cfg.get("rows", [])]
+
+    src = next((i for i, row in enumerate(rows) if cb in row), -1)
+    if src < 0:
+        bot.answer_callback_query(call.id, "❌ الزر غير موجود", show_alert=True)
+        return True
+
+    target = src - 1 if direction == "up" else src + 1
+    if target < 0 or target >= len(rows):
+        bot.answer_callback_query(call.id, "⚠️ ماكو صف بهذا الاتجاه", show_alert=True)
+        return True
+
+    # الصف المقصود يسمح بحد أقصى زرين عند النقل.
+    # دمج 3 أزرار يتم من إعدادات الصف/التقسيم، أما النقل فلا ينشئ
+    # صفاً مزدحماً أو يكسر الصفوف الموجودة.
+    if len(rows[target]) >= 2:
+        bot.answer_callback_query(
+            call.id,
+            "⚠️ الصف المقصود يحتوي زرين بالفعل. استخدم «تحديد زرين» أو افصل الصف أولاً.",
+            show_alert=True
+        )
+        return True
+
+    rows[src].remove(cb)
+    if not rows[src]:
+        rows.pop(src)
+        if src < target:
+            target -= 1
+
+    rows[target].append(cb)
+
+    cfg["rows"] = rows
+    cfg["order"] = [x for row in rows for x in row]
+    all_data[menu_key] = cfg
+    _save_button_layouts(all_data)
+
+    bot.answer_callback_query(call.id, "✅ تم نقل الزر بنجاح")
+    _show_layout_editor(call.message.chat.id, call.message.message_id, menu_key)
+    return True
+
+
+def _show_layout_hide_buttons(call, menu_key):
+    cfg = _normalize_layout_cfg(menu_key)
+    labels = _layout_labels(cfg)
+    hidden = set(cfg.get("hidden", []))
+
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    for row in cfg.get("rows", []):
+        for cb in row:
+            state = "🚫 مخفي" if cb in hidden else "✅ ظاهر"
+            kb.add(types.InlineKeyboardButton(
+                f"{state} | {labels.get(cb, cb)}",
+                callback_data=f"layout_hide_cb|{menu_key}|{cb}"
+            ))
+
+    kb.add(types.InlineKeyboardButton(
+        "🔙 رجوع",
+        callback_data=f"layout_menu|{menu_key}"
+    ))
+
+    bot.edit_message_text(
+        "👁️ **إظهار / إخفاء الأزرار**\n\n"
+        "اضغط على أي زر لتبديل حالته.",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=kb,
+        parse_mode="Markdown"
     )
 
 
 def _handle_layout_callback(call):
     if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "❌ غير مسموح", show_alert=True); return True
-    data = call.data
-    if data.startswith("layout_pair_start|"):
-        key=data.split("|",1)[1]; cfg=_ensure_layout_target(key) or {}; labels=_layout_title(key,cfg); kb=types.InlineKeyboardMarkup(row_width=1)
-        for x in cfg.get("buttons",[]):
-            cb=str(x.get("callback")); kb.add(types.InlineKeyboardButton(labels.get(cb,cb)[:40],callback_data=f"layout_pair_first|{key}|{cb}"))
-        kb.add(types.InlineKeyboardButton("🔙 رجوع",callback_data=f"layout_menu|{key}")); bot.edit_message_text("🔗 **اختار الزر الأول**",call.message.chat.id,call.message.message_id,reply_markup=kb); return True
-    if data.startswith("layout_pair_first|"):
-        _,key,first=data.split("|",2); cfg=_ensure_layout_target(key) or {}; labels=_layout_title(key,cfg); kb=types.InlineKeyboardMarkup(row_width=1)
-        for x in cfg.get("buttons",[]):
-            second=str(x.get("callback"))
-            if second!=first: kb.add(types.InlineKeyboardButton(labels.get(second,second)[:40],callback_data=f"layout_pair_do|{key}|{first}|{second}"))
-        kb.add(types.InlineKeyboardButton("🔙 اختيار الزر الأول",callback_data=f"layout_pair_start|{key}")); bot.edit_message_text(f"🤝 **الزر الأول:** {labels.get(first,first)}\n\nاختار الآن الزر الذي تريده مقابله:",call.message.chat.id,call.message.message_id,reply_markup=kb); return True
-    if data.startswith("layout_pair_do|"):
-        _,key,first,second=data.split("|",3); all_data=dict(_load_button_layouts()); cfg=dict(all_data.get(key,{})); rows=[list(r) for r in cfg.get("rows",[])]; pos=next((i for i,r in enumerate(rows) if first in r or second in r),len(rows)); rows=[[cb for cb in r if cb not in (first,second)] for r in rows]; rows=[r for r in rows if r]; rows.insert(min(pos,len(rows)),[first,second]); cfg["rows"]=rows; all_data[key]=cfg; _save_button_layouts(all_data); bot.answer_callback_query(call.id,"✅ تم تحديد الزرين ووضعهما مقابل بعض",show_alert=True); _show_layout_editor(call.message.chat.id,call.message.message_id,key); return True
-    if data.startswith("layout_row|"):
-        _,key,idx=data.split("|",2); idx=int(idx); cfg=_load_button_layouts().get(key,{}) ; rows=cfg.get("rows",[])
-        if 0<=idx<len(rows):
-            labels=_layout_title(key,cfg); row=rows[idx]; kb=types.InlineKeyboardMarkup(row_width=1)
-            if len(row)>1: kb.add(types.InlineKeyboardButton("✂️ فصل أزرار هذا الصف",callback_data=f"layout_unpair|{key}|{idx}"))
-            kb.add(types.InlineKeyboardButton("🔙 رجوع",callback_data=f"layout_menu|{key}")); bot.edit_message_text("📐 **الصف:**\n"+" ↔️ ".join(labels.get(x,x) for x in row),call.message.chat.id,call.message.message_id,reply_markup=kb,parse_mode="Markdown")
+        bot.answer_callback_query(call.id, "❌ غير مسموح", show_alert=True)
         return True
-    if data.startswith("layout_unpair|"):
-        _,key,idx=data.split("|",2); idx=int(idx); all_data=dict(_load_button_layouts()); cfg=dict(all_data.get(key,{})); rows=[list(r) for r in cfg.get("rows",[])];
-        if 0<=idx<len(rows): row=rows.pop(idx); rows[idx:idx]=[[x] for x in row]
-        cfg["rows"]=rows; all_data[key]=cfg; _save_button_layouts(all_data); bot.answer_callback_query(call.id,"✂️ تم فصل الأزرار",show_alert=True); _show_layout_editor(call.message.chat.id,call.message.message_id,key); return True
-    if data == "layout_admin":
-        _show_layout_targets(call.message.chat.id, call.message.message_id); return True
-    if data.startswith("layout_menu|"):
-        key = data.split("|", 1)[1]
-        _show_layout_editor(call.message.chat.id, call.message.message_id, key); return True
-    if data.startswith("layout_pick|"):
-        _, key, idx = data.split("|", 2); _show_layout_item(call, key, int(idx)); return True
-    if data.startswith("layout_cols|"):
-        _, key, cols = data.split("|", 2); cfg = dict(_load_button_layouts().get(key, {})); cfg["columns"] = int(cols)
-        all_data = dict(_load_button_layouts()); all_data[key] = cfg; _save_button_layouts(all_data)
-        bot.answer_callback_query(call.id, "✅ تم تغيير عدد الأزرار بالصف")
-        _show_layout_editor(call.message.chat.id, call.message.message_id, key); return True
-    if data.startswith("layout_move|"):
-        _, key, idx, direction = data.split("|", 3); idx = int(idx)
-        all_data = dict(_load_button_layouts()); cfg = dict(all_data.get(key, {})); order = list(cfg.get("order", []))
-        j = idx - 1 if direction == "up" else idx + 1
-        if 0 <= idx < len(order) and 0 <= j < len(order): order[idx], order[j] = order[j], order[idx]
-        cfg["order"] = order; all_data[key] = cfg; _save_button_layouts(all_data)
-        bot.answer_callback_query(call.id, "✅ تم تغيير مكان الزر")
-        _show_layout_editor(call.message.chat.id, call.message.message_id, key); return True
-    if data.startswith("layout_hide|"):
-        _, key, idx = data.split("|", 2); idx = int(idx)
-        all_data = dict(_load_button_layouts()); cfg = dict(all_data.get(key, {})); order = list(cfg.get("order", [])); hidden = set(cfg.get("hidden", []))
-        if 0 <= idx < len(order):
-            cb = order[idx]; hidden.remove(cb) if cb in hidden else hidden.add(cb)
-        cfg["hidden"] = list(hidden); all_data[key] = cfg; _save_button_layouts(all_data)
-        bot.answer_callback_query(call.id, "✅ تم تحديث ظهور الزر")
-        _show_layout_editor(call.message.chat.id, call.message.message_id, key); return True
-    if data.startswith("layout_reset|"):
-        key = data.split("|", 1)[1]; all_data = dict(_load_button_layouts()); cfg = dict(all_data.get(key, {}))
-        cfg["order"] = [x.get("callback") for x in cfg.get("buttons", []) if x.get("callback")]; cfg["hidden"] = []; cfg["columns"] = 1
-        all_data[key] = cfg; _save_button_layouts(all_data)
-        bot.answer_callback_query(call.id, "♻️ تم إرجاع الترتيب الافتراضي")
-        _show_layout_editor(call.message.chat.id, call.message.message_id, key); return True
+
+    data = call.data
+
+    try:
+        # 🔗 الأزرار المخصصة
+        if data == "custom_manage": _show_custom_buttons_admin(call.message.chat.id,call.message.message_id); return True
+        if data == "custom_add": _custom_start_add(call); return True
+        if data.startswith("custom_admin|"): _show_custom_admin_editor(call,data.split("|",1)[1]); return True
+        if data.startswith("custom_link_add|"): _custom_start_add_link(call,data.split("|",1)[1]); return True
+        if data.startswith("custom_link_del|"):
+            _,i,n=data.split("|",2); items=_load_custom_link_buttons(); x=_custom_link_item(i)
+            if not x or not (0<=int(n)<len(x.get("links",[]))): bot.answer_callback_query(call.id,"❌ الرابط غير موجود",show_alert=True); return True
+            x["links"].pop(int(n)); _save_custom_link_buttons(items); bot.answer_callback_query(call.id,"🗑️ تم حذف الرابط"); _show_custom_admin_editor(call,i); return True
+        if data.startswith("custom_del|"):
+            i=data.split("|",1)[1]; _save_custom_link_buttons([x for x in _load_custom_link_buttons() if str(x.get("id"))!=i]); bot.answer_callback_query(call.id,"🗑️ تم حذف الزر",show_alert=True); _show_custom_buttons_admin(call.message.chat.id,call.message.message_id); return True
+        if data.startswith("custom_menu|"):
+            _show_custom_link_menu(call.message.chat.id,call.message.message_id,data.split("|",1)[1]); bot.answer_callback_query(call.id); return True
+
+        if data == "layout_admin":
+            _show_layout_targets(call.message.chat.id, call.message.message_id)
+            return True
+
+        if data.startswith("layout_menu|"):
+            key = data.split("|", 1)[1]
+            _show_layout_editor(call.message.chat.id, call.message.message_id, key)
+            return True
+
+        if data.startswith("layout_pair_start|"):
+            key = data.split("|", 1)[1]
+            cfg = _normalize_layout_cfg(key)
+            labels = _layout_labels(cfg)
+            kb = types.InlineKeyboardMarkup(row_width=1)
+            for cb in cfg.get("order", []):
+                kb.add(types.InlineKeyboardButton(
+                    labels.get(cb, cb)[:40],
+                    callback_data=f"layout_pair_first|{key}|{cb}"
+                ))
+            kb.add(types.InlineKeyboardButton("🔙 رجوع", callback_data=f"layout_menu|{key}"))
+            bot.edit_message_text(
+                "🔗 **اختار الزر الأول**",
+                call.message.chat.id, call.message.message_id,
+                reply_markup=kb, parse_mode="Markdown"
+            )
+            return True
+
+        if data.startswith("layout_pair_first|"):
+            _, key, first = data.split("|", 2)
+            cfg = _normalize_layout_cfg(key)
+            labels = _layout_labels(cfg)
+            kb = types.InlineKeyboardMarkup(row_width=1)
+            for cb in cfg.get("order", []):
+                if cb != first:
+                    kb.add(types.InlineKeyboardButton(
+                        labels.get(cb, cb)[:40],
+                        callback_data=f"layout_pair_do|{key}|{first}|{cb}"
+                    ))
+            kb.add(types.InlineKeyboardButton(
+                "🔙 اختيار الزر الأول",
+                callback_data=f"layout_pair_start|{key}"
+            ))
+            bot.edit_message_text(
+                f"🤝 **الزر الأول:** {labels.get(first, first)}\n\n"
+                "اختار الزر الذي تريده مقابله:",
+                call.message.chat.id, call.message.message_id,
+                reply_markup=kb, parse_mode="Markdown"
+            )
+            return True
+
+        if data.startswith("layout_pair_do|"):
+            _, key, first, second = data.split("|", 3)
+            all_data = dict(_load_button_layouts())
+            cfg = dict(all_data.get(key, {}))
+            rows = [list(r) for r in cfg.get("rows", [])]
+
+            # إزالة الزرين من أي صف سابق.
+            rows = [[x for x in r if x not in (first, second)] for r in rows]
+            rows = [r for r in rows if r]
+
+            # أضفهما كصف واحد في نهاية/مكان مناسب.
+            rows.append([first, second])
+
+            cfg["rows"] = rows
+            cfg["order"] = [x for r in rows for x in r]
+            all_data[key] = cfg
+            _save_button_layouts(all_data)
+
+            bot.answer_callback_query(
+                call.id, "✅ تم وضع الزرين مقابل بعض", show_alert=True
+            )
+            _show_layout_editor(
+                call.message.chat.id, call.message.message_id, key
+            )
+            return True
+
+        if data.startswith("layout_row|"):
+            _, key, idx = data.split("|", 2)
+            _show_layout_item(call, key, int(idx))
+            return True
+
+        if data.startswith("layout_move_menu|"):
+            key = data.split("|", 1)[1]
+            _show_layout_move_buttons(call, key)
+            return True
+
+        if data.startswith("layout_move_pick|"):
+            _, key, cb = data.split("|", 2)
+            _show_layout_move_controls(call, key, cb)
+            return True
+
+        if data.startswith("layout_button_move|"):
+            _, key, cb, direction = data.split("|", 3)
+            return _move_button_between_rows(call, key, cb, direction)
+
+        if data.startswith("layout_rowmove|"):
+            _, key, idx, direction = data.split("|", 3)
+            idx = int(idx)
+            all_data = dict(_load_button_layouts())
+            cfg = dict(all_data.get(key, {}))
+            rows = [list(r) for r in cfg.get("rows", [])]
+            target = idx - 1 if direction == "up" else idx + 1
+
+            if 0 <= idx < len(rows) and 0 <= target < len(rows):
+                rows[idx], rows[target] = rows[target], rows[idx]
+                cfg["rows"] = rows
+                cfg["order"] = [x for r in rows for x in r]
+                all_data[key] = cfg
+                _save_button_layouts(all_data)
+
+            bot.answer_callback_query(call.id, "✅ تم تحريك الصف")
+            _show_layout_editor(
+                call.message.chat.id, call.message.message_id, key
+            )
+            return True
+
+        if data.startswith("layout_unpair|"):
+            _, key, idx = data.split("|", 2)
+            idx = int(idx)
+            all_data = dict(_load_button_layouts())
+            cfg = dict(all_data.get(key, {}))
+            rows = [list(r) for r in cfg.get("rows", [])]
+
+            if 0 <= idx < len(rows) and len(rows[idx]) > 1:
+                row = rows.pop(idx)
+                for cb in reversed(row):
+                    rows.insert(idx, [cb])
+
+            cfg["rows"] = rows
+            cfg["order"] = [x for r in rows for x in r]
+            all_data[key] = cfg
+            _save_button_layouts(all_data)
+
+            bot.answer_callback_query(call.id, "✂️ تم فصل الأزرار")
+            _show_layout_editor(
+                call.message.chat.id, call.message.message_id, key
+            )
+            return True
+
+        if data.startswith("layout_hide_menu|"):
+            key = data.split("|", 1)[1]
+            _show_layout_hide_buttons(call, key)
+            return True
+
+        if data.startswith("layout_hide_cb|"):
+            _, key, cb = data.split("|", 2)
+            all_data = dict(_load_button_layouts())
+            cfg = dict(all_data.get(key, {}))
+            hidden = set(cfg.get("hidden", []))
+
+            if cb in hidden:
+                hidden.remove(cb)
+                msg = "✅ تم إظهار الزر"
+            else:
+                hidden.add(cb)
+                msg = "🚫 تم إخفاء الزر"
+
+            cfg["hidden"] = list(hidden)
+            all_data[key] = cfg
+            _save_button_layouts(all_data)
+
+            bot.answer_callback_query(call.id, msg, show_alert=True)
+            _show_layout_hide_buttons(call, key)
+            return True
+
+        if data.startswith("layout_reset|"):
+            key = data.split("|", 1)[1]
+            all_data = dict(_load_button_layouts())
+            cfg = dict(all_data.get(key, {}))
+            cfg["order"] = [x.get("callback") for x in cfg.get("buttons", []) if x.get("callback")]
+            cfg["rows"] = [[x] for x in cfg["order"]]
+            cfg["hidden"] = []
+            cfg["columns"] = 1
+            all_data[key] = cfg
+            _save_button_layouts(all_data)
+
+            bot.answer_callback_query(call.id, "♻️ تم إرجاع الترتيب الافتراضي")
+            _show_layout_editor(
+                call.message.chat.id, call.message.message_id, key
+            )
+            return True
+
+        if data.startswith("layout_cols|"):
+            _, key, cols = data.split("|", 2)
+            all_data = dict(_load_button_layouts())
+            cfg = dict(all_data.get(key, {}))
+            cfg["columns"] = max(1, min(int(cols), 3))
+            all_data[key] = cfg
+            _save_button_layouts(all_data)
+
+            bot.answer_callback_query(call.id, "✅ تم تغيير سعة الصف")
+            _show_layout_editor(
+                call.message.chat.id, call.message.message_id, key
+            )
+            return True
+
+        # توافق مع النسخة القديمة: إذا وصل callback قديم نفتح التحكم.
+        if data.startswith("layout_pick|"):
+            _, key, idx = data.split("|", 2)
+            _show_layout_item(call, key, int(idx))
+            return True
+
+        if data.startswith("layout_move|"):
+            # القديم كان يعتمد order فقط؛ نحوله إلى تحريك صف آمن.
+            _, key, idx, direction = data.split("|", 3)
+            cfg = _normalize_layout_cfg(key)
+            rows = cfg.get("rows", [])
+            idx = int(idx)
+            if 0 <= idx < len(rows):
+                _show_layout_item(call, key, idx)
+            return True
+
+        if data.startswith("layout_hide|"):
+            _, key, idx = data.split("|", 2)
+            cfg = _normalize_layout_cfg(key)
+            order = cfg.get("order", [])
+            idx = int(idx)
+            if 0 <= idx < len(order):
+                cb = order[idx]
+                all_data = dict(_load_button_layouts())
+                cfg = dict(all_data.get(key, {}))
+                hidden = set(cfg.get("hidden", []))
+                if cb in hidden:
+                    hidden.remove(cb)
+                    msg = "✅ تم إظهار الزر"
+                else:
+                    hidden.add(cb)
+                    msg = "🚫 تم إخفاء الزر"
+                cfg["hidden"] = list(hidden)
+                all_data[key] = cfg
+                _save_button_layouts(all_data)
+                bot.answer_callback_query(call.id, msg, show_alert=True)
+                _show_layout_editor(
+                    call.message.chat.id, call.message.message_id, key
+                )
+            return True
+
+    except Exception as e:
+        print(f"Layout callback error: {e}")
+        try:
+            bot.answer_callback_query(
+                call.id, "❌ صار خطأ بالنظام، حاول مرة ثانية.", show_alert=True
+            )
+        except Exception:
+            pass
+        return True
+
     return False
+
 
 def update_menu_safely(bot_inst, chat_id, message_id, menu_key, markup_kb):
     _layout_snapshot(menu_key, markup_kb)
@@ -1574,7 +2105,7 @@ def query(call):
         message_id = call.message.message_id
         data = call.data
 
-        if data.startswith("layout_"):
+        if data.startswith(("layout_", "custom_")):
             if _handle_layout_callback(call):
                 return
 
