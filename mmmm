@@ -82,6 +82,79 @@ http_session.headers.update({
 # ==========================================
 # دالة الألوان الموحدة (أخضر لجميع الأزرار، أحمر للأزرار المحددة)
 # ==========================================
+
+# ============================================================
+# أدوات تطوير الخدمات والطلبات وأكواد الشحن
+# ============================================================
+ADV_SERVICE_TOOLS_V2 = True
+SERVICE_PAUSE_FIELD = "paused"
+
+def service_is_paused(srv):
+    return bool(srv.get(SERVICE_PAUSE_FIELD, False))
+
+def set_service_paused(srv_key, paused=True):
+    if srv_key not in SERVICES:
+        return False
+    SERVICES[srv_key][SERVICE_PAUSE_FIELD] = bool(paused)
+    return True
+
+def clone_service(srv_key, new_key, new_name=None, new_price=None):
+    if srv_key not in SERVICES or new_key in SERVICES:
+        return False
+    item = dict(SERVICES[srv_key])
+    if new_name is not None:
+        item["name"] = new_name
+    if new_price is not None:
+        item["price"] = float(new_price)
+    item[SERVICE_PAUSE_FIELD] = False
+    SERVICES[new_key] = item
+    return True
+
+def service_admin_actions(srv_key):
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    if srv_key not in SERVICES:
+        return kb
+    paused = service_is_paused(SERVICES[srv_key])
+    kb.add(
+        types.InlineKeyboardButton("✏️ تعديل", callback_data=f"edit_srv_{srv_key}"),
+        types.InlineKeyboardButton("📋 نسخ", callback_data=f"copy_srv_{srv_key}"),
+        types.InlineKeyboardButton(
+            "▶️ تفعيل" if paused else "⏸️ إيقاف",
+            callback_data=f"toggle_srv_{srv_key}"
+        ),
+        types.InlineKeyboardButton("🗑️ حذف", callback_data=f"delsrv_{srv_key}")
+    )
+    return kb
+
+def order_details_text(order):
+    if not order:
+        return "❌ الطلب غير موجود."
+    return (
+        "📦 تفاصيل الطلب\n\n"
+        f"🆔 رقم الطلب: {order.get('order_id', '-')}\n"
+        f"🛍️ الخدمة: {order.get('service', '-')}\n"
+        f"💰 السعر: {order.get('price', '-')}\n"
+        f"🟡 الحالة: {order.get('status', '-')}\n"
+        f"👤 المستخدم: {order.get('username') or order.get('user_id', '-')}"
+    )
+
+def make_recharge_codes(count, amount, prefix=""):
+    import secrets
+    codes = []
+    while len(codes) < int(count):
+        code = f"{prefix}{secrets.token_hex(5).upper()}"
+        if code not in codes:
+            codes.append(code)
+    return codes
+
+def recharge_admin_markup():
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        types.InlineKeyboardButton("➕ إنشاء أكواد", callback_data="recharge_create"),
+        types.InlineKeyboardButton("📋 إدارة الأكواد", callback_data="recharge_manage")
+    )
+    return kb
+
 def get_item_style(item_key):
     red_buttons = ['asiacell_recharge_menu', 'support_btn', 'agents_btn', 'support_and_agents']
     if item_key in red_buttons or item_key == SUPPORT_LINK:
@@ -738,6 +811,8 @@ def _custom_link_item(item_id):
 def _custom_main_markup_buttons(markup):
     """إضافة الأزرار المخصصة إلى الواجهة الرئيسية قبل تطبيق نظام الترتيب."""
     for item in _load_custom_link_buttons():
+        if item.get("hidden", False):
+            continue
         item_id = str(item.get("id", ""))
         name = str(item.get("name", "زر جديد"))
         if item_id:
@@ -805,6 +880,9 @@ def _show_custom_admin_editor(call, item_id):
             callback_data=f"custom_link_del|{item_id}|{i}"
         ))
     kb.add(types.InlineKeyboardButton("➕ إضافة رابط داخل الزر", callback_data=f"custom_link_add|{item_id}"))
+    kb.add(types.InlineKeyboardButton("✏️ تعديل اسم الزر", callback_data=f"custom_rename|{item_id}"))
+    hidden_text = "👁️ إظهار الزر" if item.get("hidden", False) else "🙈 إخفاء الزر"
+    kb.add(types.InlineKeyboardButton(hidden_text, callback_data=f"custom_toggle|{item_id}"))
     kb.add(types.InlineKeyboardButton("🗑️ حذف الزر بالكامل", callback_data=f"custom_del|{item_id}"))
     kb.add(types.InlineKeyboardButton("🔙 الأزرار المخصصة", callback_data="custom_manage"))
     text=(f"🔗 **{item.get('name','زر جديد')}**\n\n"
@@ -815,7 +893,7 @@ def _show_custom_admin_editor(call, item_id):
 
 def _custom_start_add(call):
     admin_states[call.from_user.id] = {"action": "custom_add_parent_name"}
-    msg=bot.send_message(call.message.chat.id, "✏️ أرسل اسم الزر الذي تريد إضافته للواجهة الرئيسية:\nمثال: **شروحات البوت**", parse_mode="Markdown")
+    msg=bot.send_message(call.message.chat.id, "✏️ أرسل اسم الزر الذي تريد إضافته للواجهة الرئيسية:\nمثال: **شروحات البوت**", parse_mode="Markdown", reply_markup=cancel_operation_markup())
     bot.register_next_step_handler(msg, process_custom_parent_name)
 
 
@@ -855,8 +933,31 @@ def _custom_start_add_link(call, item_id):
         bot.answer_callback_query(call.id, "❌ الزر غير موجود", show_alert=True)
         return
     admin_states[call.from_user.id] = {"action": "custom_add_link_name", "item_id": item_id}
-    msg=bot.send_message(call.message.chat.id, "✏️ أرسل اسم الرابط:\nمثال: **القناة الأولى** أو **شرح البوت**", parse_mode="Markdown")
+    msg=bot.send_message(call.message.chat.id, "✏️ أرسل اسم الرابط:\nمثال: **القناة الأولى** أو **شرح البوت**", parse_mode="Markdown", reply_markup=cancel_operation_markup())
     bot.register_next_step_handler(msg, process_custom_link_name)
+
+
+def process_custom_rename(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    state = admin_states.get(message.from_user.id, {})
+    if state.get("action") != "custom_rename":
+        return
+    name = (message.text or "").strip()
+    if not name or len(name) > 60:
+        msg = bot.send_message(message.chat.id, "❌ الاسم غير صالح. أرسله من جديد:", reply_markup=cancel_operation_markup())
+        bot.register_next_step_handler(msg, process_custom_rename)
+        return
+    items = list(_load_custom_link_buttons())
+    item = next((x for x in items if str(x.get("id")) == str(state.get("item_id"))), None)
+    if not item:
+        admin_states.pop(message.from_user.id, None)
+        bot.send_message(message.chat.id, "❌ الزر غير موجود.")
+        return
+    item["name"] = name[:60]
+    _save_custom_link_buttons(items)
+    admin_states.pop(message.from_user.id, None)
+    bot.send_message(message.chat.id, f"✅ تم تغيير اسم الزر إلى: **{name}**", parse_mode="Markdown")
 
 
 def process_custom_link_name(message):
@@ -873,7 +974,7 @@ def process_custom_link_name(message):
     state["link_name"]=name
     state["action"]="custom_add_link_url"
     admin_states[message.from_user.id]=state
-    msg=bot.send_message(message.chat.id, "🔗 الآن أرسل الرابط كاملًا ويجب أن يبدأ بـ **https://**\nمثال: https://t.me/YourChannel أو رابط فيديو الشرح", parse_mode="Markdown")
+    msg=bot.send_message(message.chat.id, "🔗 الآن أرسل الرابط كاملًا ويجب أن يبدأ بـ **https://**\nمثال: https://t.me/YourChannel أو رابط فيديو الشرح", parse_mode="Markdown", reply_markup=cancel_operation_markup())
     bot.register_next_step_handler(msg, process_custom_link_url)
 
 
@@ -1243,6 +1344,11 @@ def auto_check_orders_and_notifications():
 
                         if status_ar != "قيد التنفيذ":
                             supabase.table("user_orders").update({"status": status_ar}).eq("order_id", order['order_id']).execute()
+                            if status_ar == "مكتمل ✅":
+                                try:
+                                    bot.send_message(order['user_id'], f"🎉 **تم إكمال طلبك بنجاح!**\n\n🆔 رقم الطلب: `{order['order_id']}`\n📦 الخدمة: {order['service']}\n💰 السعر: `{order.get('price', 0)}` نقطة", parse_mode="Markdown")
+                                except Exception as e:
+                                    print(f"Completion notification error: {e}")
                 except Exception as e:
                     print(f"Error checking order {order['order_id']}: {e}")
         except Exception as e:
@@ -1984,6 +2090,29 @@ def _handle_layout_callback(call):
             _show_custom_admin_editor(call, item_id)
             return True
 
+        if data.startswith("custom_rename|"):
+            item_id = data.split("|", 1)[1]
+            if not _custom_link_item(item_id):
+                bot.answer_callback_query(call.id, "❌ الزر غير موجود", show_alert=True)
+                return True
+            admin_states[call.from_user.id] = {"action": "custom_rename", "item_id": item_id}
+            msg = bot.send_message(call.message.chat.id, "✏️ أرسل الاسم الجديد للزر:\n\n❌ إلغاء العملية", reply_markup=cancel_operation_markup())
+            bot.register_next_step_handler(msg, process_custom_rename)
+            return True
+
+        if data.startswith("custom_toggle|"):
+            item_id = data.split("|", 1)[1]
+            items = list(_load_custom_link_buttons())
+            item = next((x for x in items if str(x.get("id")) == str(item_id)), None)
+            if not item:
+                bot.answer_callback_query(call.id, "❌ الزر غير موجود", show_alert=True)
+                return True
+            item["hidden"] = not bool(item.get("hidden", False))
+            _save_custom_link_buttons(items)
+            bot.answer_callback_query(call.id, "👁️ تم تحديث ظهور الزر", show_alert=True)
+            _show_custom_admin_editor(call, item_id)
+            return True
+
         if data.startswith("custom_del|"):
             item_id=data.split("|", 1)[1]
             items=[x for x in _load_custom_link_buttons() if str(x.get("id")) != str(item_id)]
@@ -2264,8 +2393,70 @@ def update_menu_safely(bot_inst, chat_id, message_id, menu_key, markup_kb):
 # ==========================================
 # دالة معالجة الأزرار الموحدة
 # ==========================================
+def _advanced_service_callback_v2(call):
+    data = call.data
+    chat_id = call.from_user.id
+
+    if chat_id != ADMIN_ID:
+        return False
+
+    if data.startswith("toggle_srv_"):
+        key = data[len("toggle_srv_"):]
+        if key not in SERVICES:
+            bot.answer_callback_query(call.id, "❌ الخدمة غير موجودة.", show_alert=True)
+            return True
+        paused = not service_is_paused(SERVICES[key])
+        set_service_paused(key, paused)
+        bot.answer_callback_query(
+            call.id,
+            "⏸️ تم إيقاف الخدمة" if paused else "▶️ تم تفعيل الخدمة"
+        )
+        return True
+
+    if data.startswith("copy_srv_"):
+        key = data[len("copy_srv_"):]
+        if key not in SERVICES:
+            bot.answer_callback_query(call.id, "❌ الخدمة غير موجودة.", show_alert=True)
+            return True
+        import secrets
+        new_key = f"{key}_copy_{secrets.token_hex(2)}"
+        clone_service(key, new_key)
+        bot.answer_callback_query(call.id, "✅ تم نسخ الخدمة.")
+        return True
+
+    if data.startswith("edit_srv_"):
+        key = data[len("edit_srv_"):]
+        if key not in SERVICES:
+            bot.answer_callback_query(call.id, "❌ الخدمة غير موجودة.", show_alert=True)
+            return True
+        bot.answer_callback_query(
+            call.id,
+            "✏️ افتح تعديل الخدمة من لوحة إدارة الخدمات."
+        )
+        return True
+
+    if data == "recharge_create":
+        bot.answer_callback_query(call.id)
+        bot.send_message(
+            chat_id,
+            "➕ إنشاء أكواد شحن\n\n"
+            "أرسل العدد والقيمة هكذا:\n"
+            "10:5\n\n"
+            "يعني 10 أكواد، قيمة كل كود 5 نقاط."
+        )
+        return True
+
+    if data == "recharge_manage":
+        bot.answer_callback_query(call.id)
+        return True
+
+    return False
+
 @bot.callback_query_handler(func=lambda call: True)
 def query(call):
+
+    if _advanced_service_callback_v2(call):
+        return
     if call.data == "admin_cancel_operation":
         if call.from_user.id != ADMIN_ID:
             bot.answer_callback_query(call.id, "❌ غير مصرح.", show_alert=True)
@@ -3545,7 +3736,7 @@ def query(call):
             user_points = get_points(chat_id)
 
             if user_points < total_cost:
-                bot.send_message(chat_id, f"⚠️ رصيدك غير كافٍ لدفع السلة!\nرصيدك: `{user_points}` نقطة\nالمطلوب: `{total_cost}` نقطة", parse_mode="Markdown")
+                bot.send_message(chat_id, f"⚠️ **الرصيد غير كافٍ**\n\n💰 رصيدك الحالي: `{user_points}` نقطة\n💳 المطلوب: `{total_cost}` نقطة\n\nيرجى شحن الرصيد ثم المحاولة مرة أخرى.", parse_mode="Markdown")
                 return
 
             update_points(chat_id, -total_cost)
@@ -3974,8 +4165,13 @@ def query(call):
                 print(f"Error in buytier handler: {e}")
 
         elif data == 'confirm_order_now':
+            if chat_id in processing_order_users:
+                bot.answer_callback_query(call.id, "⏳ الطلب قيد المعالجة، انتظر قليلاً.", show_alert=True)
+                return
+            processing_order_users.add(chat_id)
             order_data = pending_orders_cache.get(chat_id)
             if not order_data:
+                processing_order_users.discard(chat_id)
                 bot.send_message(chat_id, "⚠️ انتهت جلسة الطلب، يرجى إعادة المحاولة.")
                 return
 
@@ -3983,7 +4179,8 @@ def query(call):
             user_points = get_points(chat_id)
 
             if user_points < final_price:
-                bot.send_message(chat_id, f"⚠️ رصيدك غير كافٍ!\nرصيدك: {user_points} نقطة\nالمطلوب: {final_price} نقطة")
+                processing_order_users.discard(chat_id)
+                bot.send_message(chat_id, f"⚠️ **الرصيد غير كافٍ**\n\n💰 رصيدك الحالي: `{user_points}` نقطة\n💳 المطلوب: `{final_price}` نقطة\n\nيرجى شحن الرصيد ثم المحاولة مرة أخرى.", parse_mode="Markdown")
                 return
 
             update_points(chat_id, -final_price)
@@ -4000,9 +4197,11 @@ def query(call):
                     bot.send_message(chat_id, f"✅ **تم إرسال طلبك بنجاح!**\n🆔 رقم الطلب: `{order_id}`\n🔖 رقم الـ API: `{api_id}`", parse_mode="Markdown")
                     send_proof_to_channel(chat_id, order_id, order_data['name'], order_data['qty'], api_id)
                     notify_admin_new_order(chat_id, username, order_id, order_data['name'], final_price, order_data['link'])
+                    processing_order_users.discard(chat_id)
                 else:
                     update_points(chat_id, final_price)
                     bot.send_message(chat_id, f"❌ **فشل إرسال الطلب، تم إعادة النقاط لرصيدك تلقائياً.**", parse_mode="Markdown")
+                    processing_order_users.discard(chat_id)
             else:
                 order_id = get_next_order_id()
                 username = call.from_user.username or "لا يوجد"
@@ -4011,6 +4210,7 @@ def query(call):
                 bot.send_message(ADMIN_ID, f"📦 **طلب جديد (يدوي/لعبة):**\n🆔 رقم الطلب: `{order_id}`\n👤 المستخدم: `{chat_id}` (@{username})\n📦 الخدمة: {order_data['name']}\n🎮 التفاصيل: `{link_info}`", parse_mode="Markdown")
                 bot.send_message(chat_id, f"✅ **تم استلام طلبك بنجاح!**\n🆔 رقم الطلب: `{order_id}`\n📩 تواصل مع الدعم لاستلام الطلب: {SUPPORT_USER}", parse_mode="Markdown")
                 send_proof_to_channel(chat_id, order_id, order_data['name'], order_data.get('qty', 1), link_info)
+                processing_order_users.discard(chat_id)
 
         elif data == 'cancel_order_now':
             if chat_id in pending_orders_cache:
@@ -4515,6 +4715,11 @@ def cancel_admin_operation(chat_id):
         state = globals().get(name)
         if isinstance(state, dict):
             state.pop(chat_id, None)
+
+    if isinstance(globals().get("admin_states"), dict):
+        admin_states.pop(chat_id, None)
+    if isinstance(globals().get("pending_orders_cache"), dict):
+        pending_orders_cache.pop(chat_id, None)
 
     try:
         _show_admin_panel(chat_id)
