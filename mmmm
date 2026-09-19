@@ -82,6 +82,79 @@ http_session.headers.update({
 # ==========================================
 # دالة الألوان الموحدة (أخضر لجميع الأزرار، أحمر للأزرار المحددة)
 # ==========================================
+
+# ============================================================
+# أدوات تطوير الخدمات والطلبات وأكواد الشحن
+# ============================================================
+ADV_SERVICE_TOOLS_V2 = True
+SERVICE_PAUSE_FIELD = "paused"
+
+def service_is_paused(srv):
+    return bool(srv.get(SERVICE_PAUSE_FIELD, False))
+
+def set_service_paused(srv_key, paused=True):
+    if srv_key not in SERVICES:
+        return False
+    SERVICES[srv_key][SERVICE_PAUSE_FIELD] = bool(paused)
+    return True
+
+def clone_service(srv_key, new_key, new_name=None, new_price=None):
+    if srv_key not in SERVICES or new_key in SERVICES:
+        return False
+    item = dict(SERVICES[srv_key])
+    if new_name is not None:
+        item["name"] = new_name
+    if new_price is not None:
+        item["price"] = float(new_price)
+    item[SERVICE_PAUSE_FIELD] = False
+    SERVICES[new_key] = item
+    return True
+
+def service_admin_actions(srv_key):
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    if srv_key not in SERVICES:
+        return kb
+    paused = service_is_paused(SERVICES[srv_key])
+    kb.add(
+        types.InlineKeyboardButton("✏️ تعديل", callback_data=f"edit_srv_{srv_key}"),
+        types.InlineKeyboardButton("📋 نسخ", callback_data=f"copy_srv_{srv_key}"),
+        types.InlineKeyboardButton(
+            "▶️ تفعيل" if paused else "⏸️ إيقاف",
+            callback_data=f"toggle_srv_{srv_key}"
+        ),
+        types.InlineKeyboardButton("🗑️ حذف", callback_data=f"delsrv_{srv_key}")
+    )
+    return kb
+
+def order_details_text(order):
+    if not order:
+        return "❌ الطلب غير موجود."
+    return (
+        "📦 تفاصيل الطلب\n\n"
+        f"🆔 رقم الطلب: {order.get('order_id', '-')}\n"
+        f"🛍️ الخدمة: {order.get('service', '-')}\n"
+        f"💰 السعر: {order.get('price', '-')}\n"
+        f"🟡 الحالة: {order.get('status', '-')}\n"
+        f"👤 المستخدم: {order.get('username') or order.get('user_id', '-')}"
+    )
+
+def make_recharge_codes(count, amount, prefix=""):
+    import secrets
+    codes = []
+    while len(codes) < int(count):
+        code = f"{prefix}{secrets.token_hex(5).upper()}"
+        if code not in codes:
+            codes.append(code)
+    return codes
+
+def recharge_admin_markup():
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        types.InlineKeyboardButton("➕ إنشاء أكواد", callback_data="recharge_create"),
+        types.InlineKeyboardButton("📋 إدارة الأكواد", callback_data="recharge_manage")
+    )
+    return kb
+
 def get_item_style(item_key):
     red_buttons = ['asiacell_recharge_menu', 'support_btn', 'agents_btn', 'support_and_agents']
     if item_key in red_buttons or item_key == SUPPORT_LINK:
@@ -679,105 +752,269 @@ except Exception as e:
 
 
 # ==========================================
-# 🔗 أزرار مخصصة بروابط متعددة — نسخة خفيفة
+# 🔗 نظام الأزرار المخصصة بروابط متعددة
 # ==========================================
 CUSTOM_LINK_BUTTONS_KEY = "custom_link_buttons_v1"
 _CUSTOM_LINK_BUTTONS_CACHE = None
 
+
 def _load_custom_link_buttons():
     global _CUSTOM_LINK_BUTTONS_CACHE
-    if _CUSTOM_LINK_BUTTONS_CACHE is not None: return _CUSTOM_LINK_BUTTONS_CACHE
+    if _CUSTOM_LINK_BUTTONS_CACHE is not None:
+        return _CUSTOM_LINK_BUTTONS_CACHE
     try:
-        r=supabase.table("settings").select("val_text").eq("key",CUSTOM_LINK_BUTTONS_KEY).execute()
-        d=json.loads(r.data[0].get("val_text", "")) if r.data else []
-        _CUSTOM_LINK_BUTTONS_CACHE=d if isinstance(d,list) else []
+        res = supabase.table("settings").select("val_text").eq("key", CUSTOM_LINK_BUTTONS_KEY).execute()
+        raw = res.data[0].get("val_text") if res.data else ""
+        data = json.loads(raw) if raw else []
+        _CUSTOM_LINK_BUTTONS_CACHE = data if isinstance(data, list) else []
     except Exception as e:
-        print(f"Custom buttons load error: {e}"); _CUSTOM_LINK_BUTTONS_CACHE=[]
+        print(f"Custom link buttons load error: {e}")
+        _CUSTOM_LINK_BUTTONS_CACHE = []
     return _CUSTOM_LINK_BUTTONS_CACHE
+
 
 def _save_custom_link_buttons(items):
     global _CUSTOM_LINK_BUTTONS_CACHE
-    clean=[]
-    for x in items:
-        if not isinstance(x,dict): continue
-        x=dict(x); x["id"]=str(x.get("id") or uuid.uuid4().hex[:10]); x["name"]=str(x.get("name") or "زر جديد").strip()[:60]
-        links=[]
-        for l in x.get("links",[]) if isinstance(x.get("links",[]),list) else []:
-            if isinstance(l,dict) and str(l.get("name","")).strip() and re.match(r"^https?://\S+$",str(l.get("url","")),re.I):
-                links.append({"name":str(l["name"]).strip()[:60],"url":str(l["url"]).strip()[:400]})
-        x["links"]=links; clean.append(x)
-    supabase.table("settings").upsert({"key":CUSTOM_LINK_BUTTONS_KEY,"val_text":json.dumps(clean,ensure_ascii=False)}).execute()
-    _CUSTOM_LINK_BUTTONS_CACHE=clean
+    clean = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item = dict(item)
+        item.setdefault("id", uuid.uuid4().hex[:10])
+        item.setdefault("name", "زر جديد")
+        item.setdefault("links", [])
+        if not isinstance(item["links"], list):
+            item["links"] = []
+        clean_links = []
+        for link in item["links"]:
+            if not isinstance(link, dict):
+                continue
+            name = str(link.get("name", "")).strip()
+            url = str(link.get("url", "")).strip()
+            if name and re.match(r"^https?://", url, re.I):
+                clean_links.append({"name": name[:60], "url": url[:400]})
+        item["name"] = str(item["name"]).strip()[:60] or "زر جديد"
+        item["links"] = clean_links
+        clean.append(item)
+    supabase.table("settings").upsert({
+        "key": CUSTOM_LINK_BUTTONS_KEY,
+        "val_text": json.dumps(clean, ensure_ascii=False)
+    }).execute()
+    _CUSTOM_LINK_BUTTONS_CACHE = clean
     return clean
 
-def _custom_link_item(i): return next((x for x in _load_custom_link_buttons() if str(x.get("id"))==str(i)),None)
+
+def _custom_link_item(item_id):
+    return next((x for x in _load_custom_link_buttons() if str(x.get("id")) == str(item_id)), None)
+
 
 def _custom_main_markup_buttons(markup):
-    for x in _load_custom_link_buttons():
-        i=str(x.get("id"));
-        if i: markup.add(types.InlineKeyboardButton(str(x.get("name","زر جديد")),callback_data=f"custom_menu|{i}",style=get_item_style(f"custom_menu|{i}")))
+    """إضافة الأزرار المخصصة إلى الواجهة الرئيسية قبل تطبيق نظام الترتيب."""
+    for item in _load_custom_link_buttons():
+        if item.get("hidden", False):
+            continue
+        item_id = str(item.get("id", ""))
+        name = str(item.get("name", "زر جديد"))
+        if item_id:
+            markup.add(types.InlineKeyboardButton(
+                name,
+                callback_data=f"custom_menu|{item_id}",
+                style=get_item_style(f"custom_menu|{item_id}")
+            ))
     return markup
 
-def _show_custom_link_menu(chat_id,message_id,item_id):
-    x=_custom_link_item(item_id)
-    if not x: bot.send_message(chat_id,"❌ هذا الزر لم يعد موجوداً."); return
-    kb=types.InlineKeyboardMarkup(row_width=1)
-    for l in x.get("links",[]): kb.add(types.InlineKeyboardButton(str(l.get("name","رابط"))[:60],url=str(l.get("url"))))
-    kb.add(types.InlineKeyboardButton("🔙 رجوع",callback_data="start",style=get_item_style("start")))
-    text=f"📚 **{x.get('name','شروحات البوت')}**\n\nاختر ما تريد فتحه:"
-    if not x.get("links"): text += "\n\n⚠️ لا توجد روابط مضافة حالياً."
-    try: bot.edit_message_text(text,chat_id,message_id,reply_markup=kb,parse_mode="Markdown")
-    except Exception: bot.send_message(chat_id,text,reply_markup=kb,parse_mode="Markdown")
 
-def _show_custom_buttons_admin(chat_id,message_id=None):
-    kb=types.InlineKeyboardMarkup(row_width=1)
-    for x in _load_custom_link_buttons(): kb.add(types.InlineKeyboardButton(f"🔗 {str(x.get('name','زر جديد'))[:45]}",callback_data=f"custom_admin|{x.get('id')}"))
-    kb.add(types.InlineKeyboardButton("➕ إضافة زر جديد",callback_data="custom_add"),types.InlineKeyboardButton("🔙 لوحة الإدارة",callback_data="admin_panel"))
-    text="🔗 **الأزرار المخصصة**\n\nأضف زرًا للواجهة الرئيسية، ثم أضف داخله قنوات أو فيديوهات أو أي رابط HTTPS."
+def _show_custom_link_menu(chat_id, message_id, item_id):
+    item = _custom_link_item(item_id)
+    if not item:
+        bot.answer_callback_query("", "❌ الزر غير موجود", show_alert=True) if False else None
+        bot.send_message(chat_id, "❌ هذا الزر لم يعد موجوداً.")
+        return
+    links = item.get("links", [])
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for link in links:
+        url = str(link.get("url", "")).strip()
+        name = str(link.get("name", "رابط")).strip()
+        if url and re.match(r"^https?://", url, re.I):
+            markup.add(types.InlineKeyboardButton(name[:60], url=url))
+    markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="start", style=get_item_style("start")))
+    text = f"📚 **{item.get('name', 'شروحات البوت')}**\n\nاختر ما تريد فتحه:"
+    if not links:
+        text += "\n\n⚠️ لا توجد روابط مضافة حالياً."
+    try:
+        bot.edit_message_text(text, chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+    except Exception:
+        bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+
+
+def _show_custom_buttons_admin(chat_id, message_id=None):
+    items = _load_custom_link_buttons()
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for item in items:
+        item_id = str(item.get("id", ""))
+        markup.add(types.InlineKeyboardButton(
+            f"🔗 {str(item.get('name', 'زر جديد'))[:45]}",
+            callback_data=f"custom_admin|{item_id}"
+        ))
+    markup.add(types.InlineKeyboardButton("➕ إضافة زر جديد", callback_data="custom_add"))
+    markup.add(types.InlineKeyboardButton("🔙 لوحة الإدارة", callback_data="admin_panel"))
+    text = "🔗 **الأزرار المخصصة**\n\nتقدر تضيف زر للواجهة الرئيسية، وداخل الزر تضيف قنوات، شرح، فيديو أو أي رابط HTTPS."
     if message_id:
-        try: bot.edit_message_text(text,chat_id,message_id,reply_markup=kb,parse_mode="Markdown")
-        except Exception: bot.send_message(chat_id,text,reply_markup=kb,parse_mode="Markdown")
-    else: bot.send_message(chat_id,text,reply_markup=kb,parse_mode="Markdown")
+        try:
+            bot.edit_message_text(text, chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+        except Exception:
+            bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+    else:
+        bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
 
-def _show_custom_admin_editor(call,item_id):
-    x=_custom_link_item(item_id)
-    if not x: bot.answer_callback_query(call.id,"❌ الزر غير موجود",show_alert=True); return
-    kb=types.InlineKeyboardMarkup(row_width=1)
-    for i,l in enumerate(x.get("links",[])): kb.add(types.InlineKeyboardButton(f"🗑️ {i+1}. {str(l.get('name','رابط'))[:45]}",callback_data=f"custom_link_del|{item_id}|{i}"))
-    kb.add(types.InlineKeyboardButton("➕ إضافة رابط",callback_data=f"custom_link_add|{item_id}"),types.InlineKeyboardButton("🗑️ حذف الزر",callback_data=f"custom_del|{item_id}"),types.InlineKeyboardButton("🔙 رجوع",callback_data="custom_manage"))
-    bot.edit_message_text(f"🔗 **{x.get('name','زر جديد')}**\n\nعدد الروابط: `{len(x.get('links',[]))}`",call.message.chat.id,call.message.message_id,reply_markup=kb,parse_mode="Markdown")
+
+def _show_custom_admin_editor(call, item_id):
+    item = _custom_link_item(item_id)
+    if not item:
+        bot.answer_callback_query(call.id, "❌ الزر غير موجود", show_alert=True)
+        return
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    for i, link in enumerate(item.get("links", [])):
+        kb.add(types.InlineKeyboardButton(
+            f"🔗 {i+1}. {str(link.get('name','رابط'))[:45]}",
+            callback_data=f"custom_link_del|{item_id}|{i}"
+        ))
+    kb.add(types.InlineKeyboardButton("➕ إضافة رابط داخل الزر", callback_data=f"custom_link_add|{item_id}"))
+    kb.add(types.InlineKeyboardButton("✏️ تعديل اسم الزر", callback_data=f"custom_rename|{item_id}"))
+    hidden_text = "👁️ إظهار الزر" if item.get("hidden", False) else "🙈 إخفاء الزر"
+    kb.add(types.InlineKeyboardButton(hidden_text, callback_data=f"custom_toggle|{item_id}"))
+    kb.add(types.InlineKeyboardButton("🗑️ حذف الزر بالكامل", callback_data=f"custom_del|{item_id}"))
+    kb.add(types.InlineKeyboardButton("🔙 الأزرار المخصصة", callback_data="custom_manage"))
+    text=(f"🔗 **{item.get('name','زر جديد')}**\n\n"
+          f"عدد الروابط: `{len(item.get('links', []))}`\n\n"
+          "اضغط «إضافة رابط داخل الزر» وأدخل اسم الرابط ثم رابطه.")
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown")
+
 
 def _custom_start_add(call):
-    msg=bot.send_message(call.message.chat.id,"✏️ أرسل اسم الزر:"); bot.register_next_step_handler(msg,process_custom_parent_name)
+    admin_states[call.from_user.id] = {"action": "custom_add_parent_name"}
+    msg=bot.send_message(call.message.chat.id, "✏️ أرسل اسم الزر الذي تريد إضافته للواجهة الرئيسية:\nمثال: **شروحات البوت**", parse_mode="Markdown", reply_markup=cancel_operation_markup())
+    bot.register_next_step_handler(msg, process_custom_parent_name)
 
-def process_custom_parent_name(m):
-    if m.from_user.id!=ADMIN_ID:return
-    name=(m.text or "").strip()
+
+def process_custom_parent_name(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    name=(message.text or "").strip()
     if not name or len(name)>60:
-        msg=bot.send_message(m.chat.id,"❌ الاسم غير صالح. أرسله من جديد."); bot.register_next_step_handler(msg,process_custom_parent_name); return
-    x={"id":uuid.uuid4().hex[:10],"name":name,"links":[]}; _save_custom_link_buttons(_load_custom_link_buttons()+[x])
-    bot.send_message(m.chat.id,f"✅ تم إنشاء **{name}**. أضف الروابط من هنا:",reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("➕ إضافة رابط",callback_data=f"custom_link_add|{x['id']}"),types.InlineKeyboardButton("🔙 رجوع",callback_data="custom_manage")),parse_mode="Markdown")
+        msg=bot.send_message(message.chat.id, "❌ الاسم غير صالح. أرسله من جديد (حتى 60 حرف).")
+        bot.register_next_step_handler(msg, process_custom_parent_name)
+        return
+    item={"id": uuid.uuid4().hex[:10], "name": name, "links": []}
+    items=list(_load_custom_link_buttons())
+    items.append(item)
+    try:
+        _save_custom_link_buttons(items)
+    except Exception as e:
+        print(f"Custom parent save error: {e}")
+        bot.send_message(message.chat.id, "❌ تعذر حفظ الزر في Supabase.")
+        return
+    admin_states.pop(message.from_user.id, None)
+    bot.send_message(message.chat.id, f"✅ تم إنشاء زر **{name}**.\nالآن أضف الروابط التي تظهر داخله:", parse_mode="Markdown")
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("➕ إضافة رابط داخل الزر", callback_data=f"custom_link_add|{item['id']}"))
+    kb.add(types.InlineKeyboardButton("🗑️ حذف الزر بالكامل", callback_data=f"custom_del|{item['id']}"))
+    kb.add(types.InlineKeyboardButton("🔙 الأزرار المخصصة", callback_data="custom_manage"))
+    bot.send_message(
+        message.chat.id,
+        f"🔗 **{name}**\n\nعدد الروابط: `0`",
+        reply_markup=kb,
+        parse_mode="Markdown"
+    )
 
-def _custom_start_add_link(call,item_id):
-    if not _custom_link_item(item_id): bot.answer_callback_query(call.id,"❌ الزر غير موجود",show_alert=True); return
-    msg=bot.send_message(call.message.chat.id,"✏️ أرسل اسم الرابط:"); bot.register_next_step_handler(msg,process_custom_link_name,item_id)
 
-def process_custom_link_name(m,item_id):
-    if m.from_user.id!=ADMIN_ID:return
-    name=(m.text or "").strip()
+def _custom_start_add_link(call, item_id):
+    if not _custom_link_item(item_id):
+        bot.answer_callback_query(call.id, "❌ الزر غير موجود", show_alert=True)
+        return
+    admin_states[call.from_user.id] = {"action": "custom_add_link_name", "item_id": item_id}
+    msg=bot.send_message(call.message.chat.id, "✏️ أرسل اسم الرابط:\nمثال: **القناة الأولى** أو **شرح البوت**", parse_mode="Markdown", reply_markup=cancel_operation_markup())
+    bot.register_next_step_handler(msg, process_custom_link_name)
+
+
+def process_custom_rename(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    state = admin_states.get(message.from_user.id, {})
+    if state.get("action") != "custom_rename":
+        return
+    name = (message.text or "").strip()
+    if not name or len(name) > 60:
+        msg = bot.send_message(message.chat.id, "❌ الاسم غير صالح. أرسله من جديد:", reply_markup=cancel_operation_markup())
+        bot.register_next_step_handler(msg, process_custom_rename)
+        return
+    items = list(_load_custom_link_buttons())
+    item = next((x for x in items if str(x.get("id")) == str(state.get("item_id"))), None)
+    if not item:
+        admin_states.pop(message.from_user.id, None)
+        bot.send_message(message.chat.id, "❌ الزر غير موجود.")
+        return
+    item["name"] = name[:60]
+    _save_custom_link_buttons(items)
+    admin_states.pop(message.from_user.id, None)
+    bot.send_message(message.chat.id, f"✅ تم تغيير اسم الزر إلى: **{name}**", parse_mode="Markdown")
+
+
+def process_custom_link_name(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    state=admin_states.get(message.from_user.id, {})
+    if state.get("action") != "custom_add_link_name":
+        return
+    name=(message.text or "").strip()
     if not name or len(name)>60:
-        msg=bot.send_message(m.chat.id,"❌ الاسم غير صالح. أرسله من جديد."); bot.register_next_step_handler(msg,process_custom_link_name,item_id); return
-    msg=bot.send_message(m.chat.id,"🔗 أرسل الرابط كاملًا ويجب أن يبدأ بـ https://"); bot.register_next_step_handler(msg,process_custom_link_url,item_id,name)
+        msg=bot.send_message(message.chat.id, "❌ الاسم غير صالح. أرسله من جديد.")
+        bot.register_next_step_handler(msg, process_custom_link_name)
+        return
+    state["link_name"]=name
+    state["action"]="custom_add_link_url"
+    admin_states[message.from_user.id]=state
+    msg=bot.send_message(message.chat.id, "🔗 الآن أرسل الرابط كاملًا ويجب أن يبدأ بـ **https://**\nمثال: https://t.me/YourChannel أو رابط فيديو الشرح", parse_mode="Markdown", reply_markup=cancel_operation_markup())
+    bot.register_next_step_handler(msg, process_custom_link_url)
 
-def process_custom_link_url(m,item_id,name):
-    if m.from_user.id!=ADMIN_ID:return
-    url=(m.text or "").strip()
-    if not re.match(r"^https?://\S+$",url,re.I):
-        msg=bot.send_message(m.chat.id,"❌ الرابط غير صالح."); bot.register_next_step_handler(msg,process_custom_link_url,item_id,name); return
-    items=_load_custom_link_buttons(); x=_custom_link_item(item_id)
-    if not x: bot.send_message(m.chat.id,"❌ الزر غير موجود."); return
-    x.setdefault("links",[]).append({"name":name,"url":url}); _save_custom_link_buttons(items)
-    bot.send_message(m.chat.id,"✅ تمت إضافة الرابط.")
+
+def process_custom_link_url(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    state=admin_states.get(message.from_user.id, {})
+    if state.get("action") != "custom_add_link_url":
+        return
+    url=(message.text or "").strip()
+    if not re.match(r"^https?://[^\\s]+$", url, re.I):
+        msg=bot.send_message(message.chat.id, "❌ الرابط غير صالح. أرسله كرابط HTTPS كامل.")
+        bot.register_next_step_handler(msg, process_custom_link_url)
+        return
+    item_id=state.get("item_id")
+    items=list(_load_custom_link_buttons())
+    item=next((x for x in items if str(x.get("id"))==str(item_id)), None)
+    if not item:
+        admin_states.pop(message.from_user.id, None)
+        bot.send_message(message.chat.id, "❌ الزر غير موجود.")
+        return
+    item.setdefault("links", []).append({"name": state.get("link_name","رابط"), "url": url})
+    try:
+        _save_custom_link_buttons(items)
+    except Exception as e:
+        print(f"Custom link save error: {e}")
+        bot.send_message(message.chat.id, "❌ تعذر حفظ الرابط.")
+        return
+    admin_states.pop(message.from_user.id, None)
+    bot.send_message(message.chat.id, "✅ تمت إضافة الرابط. إذا تريد أضف رابطًا آخر من لوحة الزر.")
+    # Show the editor as a fresh message, avoiding dependency on callback objects.
+    item2=_custom_link_item(item_id)
+    if item2:
+        kb=types.InlineKeyboardMarkup(row_width=1)
+        for i,link in enumerate(item2.get("links", [])):
+            kb.add(types.InlineKeyboardButton(f"🔗 {i+1}. {str(link.get('name','رابط'))[:45]}", callback_data=f"custom_link_del|{item_id}|{i}"))
+        kb.add(types.InlineKeyboardButton("➕ إضافة رابط داخل الزر", callback_data=f"custom_link_add|{item_id}"))
+        kb.add(types.InlineKeyboardButton("🗑️ حذف الزر بالكامل", callback_data=f"custom_del|{item_id}"))
+        kb.add(types.InlineKeyboardButton("🔙 الأزرار المخصصة", callback_data="custom_manage"))
+        bot.send_message(message.chat.id, f"🔗 **{item2.get('name','زر')}**\n\nعدد الروابط: `{len(item2.get('links', []))}`", reply_markup=kb, parse_mode="Markdown")
 
 
 def admin_panel_shortcut(chat_id, message_id=None):
@@ -1107,6 +1344,11 @@ def auto_check_orders_and_notifications():
 
                         if status_ar != "قيد التنفيذ":
                             supabase.table("user_orders").update({"status": status_ar}).eq("order_id", order['order_id']).execute()
+                            if status_ar == "مكتمل ✅":
+                                try:
+                                    bot.send_message(order['user_id'], f"🎉 **تم إكمال طلبك بنجاح!**\n\n🆔 رقم الطلب: `{order['order_id']}`\n📦 الخدمة: {order['service']}\n💰 السعر: `{order.get('price', 0)}` نقطة", parse_mode="Markdown")
+                                except Exception as e:
+                                    print(f"Completion notification error: {e}")
                 except Exception as e:
                     print(f"Error checking order {order['order_id']}: {e}")
         except Exception as e:
@@ -1817,19 +2059,72 @@ def _handle_layout_callback(call):
     data = call.data
 
     try:
-        # 🔗 الأزرار المخصصة
-        if data == "custom_manage": _show_custom_buttons_admin(call.message.chat.id,call.message.message_id); return True
-        if data == "custom_add": _custom_start_add(call); return True
-        if data.startswith("custom_admin|"): _show_custom_admin_editor(call,data.split("|",1)[1]); return True
-        if data.startswith("custom_link_add|"): _custom_start_add_link(call,data.split("|",1)[1]); return True
+        # 🔗 الأزرار المخصصة بروابط متعددة
+        if data == "custom_manage":
+            _show_custom_buttons_admin(call.message.chat.id, call.message.message_id)
+            return True
+
+        if data == "custom_add":
+            _custom_start_add(call)
+            return True
+
+        if data.startswith("custom_admin|"):
+            _show_custom_admin_editor(call, data.split("|", 1)[1])
+            return True
+
+        if data.startswith("custom_link_add|"):
+            _custom_start_add_link(call, data.split("|", 1)[1])
+            return True
+
         if data.startswith("custom_link_del|"):
-            _,i,n=data.split("|",2); items=_load_custom_link_buttons(); x=_custom_link_item(i)
-            if not x or not (0<=int(n)<len(x.get("links",[]))): bot.answer_callback_query(call.id,"❌ الرابط غير موجود",show_alert=True); return True
-            x["links"].pop(int(n)); _save_custom_link_buttons(items); bot.answer_callback_query(call.id,"🗑️ تم حذف الرابط"); _show_custom_admin_editor(call,i); return True
+            _, item_id, idx_s = data.split("|", 2)
+            items=list(_load_custom_link_buttons())
+            item=next((x for x in items if str(x.get("id"))==str(item_id)), None)
+            idx=int(idx_s)
+            if not item or idx < 0 or idx >= len(item.get("links", [])):
+                bot.answer_callback_query(call.id, "❌ الرابط غير موجود", show_alert=True)
+                return True
+            item["links"].pop(idx)
+            _save_custom_link_buttons(items)
+            bot.answer_callback_query(call.id, "🗑️ تم حذف الرابط")
+            _show_custom_admin_editor(call, item_id)
+            return True
+
+        if data.startswith("custom_rename|"):
+            item_id = data.split("|", 1)[1]
+            if not _custom_link_item(item_id):
+                bot.answer_callback_query(call.id, "❌ الزر غير موجود", show_alert=True)
+                return True
+            admin_states[call.from_user.id] = {"action": "custom_rename", "item_id": item_id}
+            msg = bot.send_message(call.message.chat.id, "✏️ أرسل الاسم الجديد للزر:\n\n❌ إلغاء العملية", reply_markup=cancel_operation_markup())
+            bot.register_next_step_handler(msg, process_custom_rename)
+            return True
+
+        if data.startswith("custom_toggle|"):
+            item_id = data.split("|", 1)[1]
+            items = list(_load_custom_link_buttons())
+            item = next((x for x in items if str(x.get("id")) == str(item_id)), None)
+            if not item:
+                bot.answer_callback_query(call.id, "❌ الزر غير موجود", show_alert=True)
+                return True
+            item["hidden"] = not bool(item.get("hidden", False))
+            _save_custom_link_buttons(items)
+            bot.answer_callback_query(call.id, "👁️ تم تحديث ظهور الزر", show_alert=True)
+            _show_custom_admin_editor(call, item_id)
+            return True
+
         if data.startswith("custom_del|"):
-            i=data.split("|",1)[1]; _save_custom_link_buttons([x for x in _load_custom_link_buttons() if str(x.get("id"))!=i]); bot.answer_callback_query(call.id,"🗑️ تم حذف الزر",show_alert=True); _show_custom_buttons_admin(call.message.chat.id,call.message.message_id); return True
+            item_id=data.split("|", 1)[1]
+            items=[x for x in _load_custom_link_buttons() if str(x.get("id")) != str(item_id)]
+            _save_custom_link_buttons(items)
+            bot.answer_callback_query(call.id, "🗑️ تم حذف الزر بالكامل", show_alert=True)
+            _show_custom_buttons_admin(call.message.chat.id, call.message.message_id)
+            return True
+
         if data.startswith("custom_menu|"):
-            _show_custom_link_menu(call.message.chat.id,call.message.message_id,data.split("|",1)[1]); bot.answer_callback_query(call.id); return True
+            _show_custom_link_menu(call.message.chat.id, call.message.message_id, data.split("|", 1)[1])
+            bot.answer_callback_query(call.id)
+            return True
 
         if data == "layout_admin":
             _show_layout_targets(call.message.chat.id, call.message.message_id)
@@ -2099,11 +2394,96 @@ def update_menu_safely(bot_inst, chat_id, message_id, menu_key, markup_kb):
 # دالة معالجة الأزرار الموحدة
 # ==========================================
 @bot.callback_query_handler(func=lambda call: True)
+
+def _advanced_service_callback_v2(call):
+    data = call.data
+    chat_id = call.from_user.id
+
+    if chat_id != ADMIN_ID:
+        return False
+
+    if data.startswith("toggle_srv_"):
+        key = data[len("toggle_srv_"):]
+        if key not in SERVICES:
+            bot.answer_callback_query(call.id, "❌ الخدمة غير موجودة.", show_alert=True)
+            return True
+        paused = not service_is_paused(SERVICES[key])
+        set_service_paused(key, paused)
+        bot.answer_callback_query(
+            call.id,
+            "⏸️ تم إيقاف الخدمة" if paused else "▶️ تم تفعيل الخدمة"
+        )
+        return True
+
+    if data.startswith("copy_srv_"):
+        key = data[len("copy_srv_"):]
+        if key not in SERVICES:
+            bot.answer_callback_query(call.id, "❌ الخدمة غير موجودة.", show_alert=True)
+            return True
+        import secrets
+        new_key = f"{key}_copy_{secrets.token_hex(2)}"
+        clone_service(key, new_key)
+        bot.answer_callback_query(call.id, "✅ تم نسخ الخدمة.")
+        return True
+
+    if data.startswith("edit_srv_"):
+        key = data[len("edit_srv_"):]
+        if key not in SERVICES:
+            bot.answer_callback_query(call.id, "❌ الخدمة غير موجودة.", show_alert=True)
+            return True
+        bot.answer_callback_query(
+            call.id,
+            "✏️ افتح تعديل الخدمة من لوحة إدارة الخدمات."
+        )
+        return True
+
+    if data == "recharge_create":
+        bot.answer_callback_query(call.id)
+        bot.send_message(
+            chat_id,
+            "➕ إنشاء أكواد شحن\n\n"
+            "أرسل العدد والقيمة هكذا:\n"
+            "10:5\n\n"
+            "يعني 10 أكواد، قيمة كل كود 5 نقاط."
+        )
+        return True
+
+    if data == "recharge_manage":
+        bot.answer_callback_query(call.id)
+        return True
+
+    return False
+
 def query(call):
+
+    if _advanced_service_callback_v2(call):
+        return
+    if call.data == "admin_cancel_operation":
+        if call.from_user.id != ADMIN_ID:
+            bot.answer_callback_query(call.id, "❌ غير مصرح.", show_alert=True)
+            return
+        cancel_admin_operation(call.from_user.id)
+        bot.answer_callback_query(call.id, "تم إلغاء العملية.")
+        return
+
     try:
         chat_id = call.message.chat.id
         message_id = call.message.message_id
         data = call.data
+
+        if data in ("manual_type_quantity", "manual_type_subscription"):
+            if chat_id != ADMIN_ID:
+                bot.answer_callback_query(call.id, "❌ هذا الخيار للأدمن فقط.", show_alert=True)
+                return
+            if chat_id not in temp_add_service:
+                bot.answer_callback_query(call.id, "❌ انتهت جلسة إضافة الخدمة.", show_alert=True)
+                return
+            temp_add_service[chat_id]["manual_type"] = (
+                "quantity" if data == "manual_type_quantity" else "subscription"
+            )
+            bot.answer_callback_query(call.id, "✅ تم اختيار النوع")
+            ask_manual_service_values(chat_id)
+            return
 
         if data.startswith(("layout_", "custom_")):
             if _handle_layout_callback(call):
@@ -3357,7 +3737,7 @@ def query(call):
             user_points = get_points(chat_id)
 
             if user_points < total_cost:
-                bot.send_message(chat_id, f"⚠️ رصيدك غير كافٍ لدفع السلة!\nرصيدك: `{user_points}` نقطة\nالمطلوب: `{total_cost}` نقطة", parse_mode="Markdown")
+                bot.send_message(chat_id, f"⚠️ **الرصيد غير كافٍ**\n\n💰 رصيدك الحالي: `{user_points}` نقطة\n💳 المطلوب: `{total_cost}` نقطة\n\nيرجى شحن الرصيد ثم المحاولة مرة أخرى.", parse_mode="Markdown")
                 return
 
             update_points(chat_id, -total_cost)
@@ -3786,8 +4166,13 @@ def query(call):
                 print(f"Error in buytier handler: {e}")
 
         elif data == 'confirm_order_now':
+            if chat_id in processing_order_users:
+                bot.answer_callback_query(call.id, "⏳ الطلب قيد المعالجة، انتظر قليلاً.", show_alert=True)
+                return
+            processing_order_users.add(chat_id)
             order_data = pending_orders_cache.get(chat_id)
             if not order_data:
+                processing_order_users.discard(chat_id)
                 bot.send_message(chat_id, "⚠️ انتهت جلسة الطلب، يرجى إعادة المحاولة.")
                 return
 
@@ -3795,7 +4180,8 @@ def query(call):
             user_points = get_points(chat_id)
 
             if user_points < final_price:
-                bot.send_message(chat_id, f"⚠️ رصيدك غير كافٍ!\nرصيدك: {user_points} نقطة\nالمطلوب: {final_price} نقطة")
+                processing_order_users.discard(chat_id)
+                bot.send_message(chat_id, f"⚠️ **الرصيد غير كافٍ**\n\n💰 رصيدك الحالي: `{user_points}` نقطة\n💳 المطلوب: `{final_price}` نقطة\n\nيرجى شحن الرصيد ثم المحاولة مرة أخرى.", parse_mode="Markdown")
                 return
 
             update_points(chat_id, -final_price)
@@ -3812,9 +4198,11 @@ def query(call):
                     bot.send_message(chat_id, f"✅ **تم إرسال طلبك بنجاح!**\n🆔 رقم الطلب: `{order_id}`\n🔖 رقم الـ API: `{api_id}`", parse_mode="Markdown")
                     send_proof_to_channel(chat_id, order_id, order_data['name'], order_data['qty'], api_id)
                     notify_admin_new_order(chat_id, username, order_id, order_data['name'], final_price, order_data['link'])
+                    processing_order_users.discard(chat_id)
                 else:
                     update_points(chat_id, final_price)
                     bot.send_message(chat_id, f"❌ **فشل إرسال الطلب، تم إعادة النقاط لرصيدك تلقائياً.**", parse_mode="Markdown")
+                    processing_order_users.discard(chat_id)
             else:
                 order_id = get_next_order_id()
                 username = call.from_user.username or "لا يوجد"
@@ -3823,6 +4211,7 @@ def query(call):
                 bot.send_message(ADMIN_ID, f"📦 **طلب جديد (يدوي/لعبة):**\n🆔 رقم الطلب: `{order_id}`\n👤 المستخدم: `{chat_id}` (@{username})\n📦 الخدمة: {order_data['name']}\n🎮 التفاصيل: `{link_info}`", parse_mode="Markdown")
                 bot.send_message(chat_id, f"✅ **تم استلام طلبك بنجاح!**\n🆔 رقم الطلب: `{order_id}`\n📩 تواصل مع الدعم لاستلام الطلب: {SUPPORT_USER}", parse_mode="Markdown")
                 send_proof_to_channel(chat_id, order_id, order_data['name'], order_data.get('qty', 1), link_info)
+                processing_order_users.discard(chat_id)
 
         elif data == 'cancel_order_now':
             if chat_id in pending_orders_cache:
@@ -4311,37 +4700,86 @@ def process_generic_custom_qty(message, base_service_key):
         markup_back.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='our_services', style=get_item_style('our_services')))
         bot.send_message(chat_id, "⚠️ يرجى إدخال أرقام صحيحة فقط:", reply_markup=markup_back)
 
+# ==============================
+# ❌ نظام إلغاء العمليات للأدمن
+# ==============================
+def cancel_admin_operation(chat_id):
+    """يمسح الحالات المؤقتة فقط، ولا يلمس البيانات المحفوظة."""
+    for name in (
+        "temp_add_service",
+        "manual_service_type",
+        "temp_new_button",
+        "temp_add_button",
+        "temp_add_category",
+        "temp_edit_service",
+    ):
+        state = globals().get(name)
+        if isinstance(state, dict):
+            state.pop(chat_id, None)
+
+    if isinstance(globals().get("admin_states"), dict):
+        admin_states.pop(chat_id, None)
+    if isinstance(globals().get("pending_orders_cache"), dict):
+        pending_orders_cache.pop(chat_id, None)
+
+    try:
+        _show_admin_panel(chat_id)
+    except Exception:
+        bot.send_message(
+            chat_id,
+            "❌ تم إلغاء العملية.\nلم يتم حفظ البيانات التي أدخلتها."
+        )
+
+
+def ask_manual_service_type(chat_id, message_id=None):
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("🔢 كمية : سعر", callback_data="manual_type_quantity"),
+        types.InlineKeyboardButton("📦 اشتراك : سعر", callback_data="manual_type_subscription")
+    )
+    markup.add(types.InlineKeyboardButton(
+        "❌ إلغاء العملية",
+        callback_data="admin_cancel_operation"
+    ))
+    prompt = (
+        "⚙️ **اختر نوع الخدمة اليدوية:**\n\n"
+        "🔢 **كمية : سعر** — للألعاب والكميات\n"
+        "📦 **اشتراك : سعر** — للاشتراكات والباقات"
+    )
+    if message_id:
+        bot.edit_message_text(prompt, chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+    else:
+        bot.send_message(chat_id, prompt, reply_markup=markup, parse_mode="Markdown")
+
+
+def ask_manual_service_values(chat_id):
+    service_type = temp_add_service.get(chat_id, {}).get("manual_type", "subscription")
+    if service_type == "quantity":
+        prompt = "🔢 **أرسل الكمية والسعر:**\n`الكمية:السعر`\n\nمثال: `60:2` أو `344:9` أو `810:17`"
+    else:
+        prompt = "📦 **أرسل اسم الاشتراك والسعر:**\n`اسم الاشتراك:السعر`\n\nمثال: `شهر:15` أو `3 أشهر:40` أو `سنة:100`"
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data="adm_manage_services", style=get_item_style('adm_manage_services')))
+    markup.add(types.InlineKeyboardButton(
+        "❌ إلغاء العملية",
+        callback_data="admin_cancel_operation"
+    ))
+    msg = bot.send_message(chat_id, prompt, parse_mode="Markdown", reply_markup=markup)
+    bot.register_next_step_handler(msg, step_manual_srv_save_final)
+
+
 def step_manual_srv_desc_input(message):
     chat_id = message.chat.id
-    text_val = message.text.strip()
     if chat_id in temp_add_service:
-        temp_add_service[chat_id]['msg'] = text_val # حفظ رسالة التوجيه المخصصة للزبون
-    
-    markup_back = types.InlineKeyboardMarkup()
-    markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
-    
-    msg = bot.send_message(
-        chat_id,
-        "✍️ **أدخل الخيار اليدوي والسعر بالصيغة النصية الحرة:**\n`النص:السعر`\n\n*مثال:*\n`الاشتراك شهر: 15`\nأو `باقة أسبوعية: 5`",
-        parse_mode="Markdown",
-        reply_markup=markup_back
-    )
-    bot.register_next_step_handler(msg, step_manual_srv_save_final)
+        temp_add_service[chat_id]['msg'] = message.text.strip()
+    ask_manual_service_type(chat_id)
+
 
 def skip_manual_srv_desc(chat_id):
     if chat_id in temp_add_service:
         temp_add_service[chat_id]['msg'] = "🎮 **أرسل المعلومات أو الآيدي المطلوب للخدمة:**"
-    
-    markup_back = types.InlineKeyboardMarkup()
-    markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
-    
-    msg = bot.send_message(
-        chat_id,
-        "✍️ **أدخل الخيار اليدوي والسعر بالصيغة:**\n`النص:السعر`\n\n*مثال:*\n`الاشتراك شهر: 15`",
-        parse_mode="Markdown",
-        reply_markup=markup_back
-    )
-    bot.register_next_step_handler(msg, step_manual_srv_save_final)
+    ask_manual_service_type(chat_id)
+
 
 def step_manual_srv_save_final(message):
     chat_id = message.chat.id
@@ -4361,6 +4799,13 @@ def step_manual_srv_save_final(message):
         if len(parts) >= 2:
             custom_label = parts[0].strip()
             price = float(parts[1].strip())
+            category_val = temp_add_service.get(chat_id, {}).get('category')
+            manual_type = temp_add_service.get(chat_id, {}).get('manual_type', 'subscription')
+            if not custom_label or price <= 0:
+                raise ValueError("بيانات غير صحيحة")
+            if manual_type == 'quantity':
+                if not custom_label.isdigit() or int(custom_label) <= 0:
+                    raise ValueError("الكمية يجب أن تكون رقمًا صحيحًا")
         else:
             raise ValueError("صيغة غير صحيحة")
             
@@ -4392,12 +4837,14 @@ def step_manual_srv_save_final(message):
         except Exception as db_err:
             print(f"Error saving manual service to Supabase: {db_err}")
         
-        bot.send_message(chat_id, f"✅ **تمت إضافة وحفظ الخدمة اليدوية بنجاح!**\n🏷️ الخيار: `{custom_label}`\n💰 السعر: `{price}` نقطة", parse_mode="Markdown")
+        option_title = 'الكمية' if manual_type == 'quantity' else 'اسم الاشتراك'
+        bot.send_message(chat_id, f"✅ **تمت إضافة وحفظ الخدمة اليدوية بنجاح!**\n🏷️ {option_title}: `{custom_label}`\n💰 السعر: `{price}` نقطة", parse_mode="Markdown")
         del temp_add_service[chat_id]
     except Exception as e:
         markup_back = types.InlineKeyboardMarkup()
         markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
-        msg = bot.send_message(chat_id, f"⚠️ الصيغة غير صحيحة. أرسل بالشكل `النص:السعر` (مثال `الاشتراك شهر: 15`):", reply_markup=markup_back)
+        fmt = "`الكمية:السعر`" if temp_add_service.get(chat_id, {}).get('manual_type') == 'quantity' else "`اسم الاشتراك:السعر`"
+        msg = bot.send_message(chat_id, f"⚠️ الصيغة غير صحيحة. أرسل بالشكل المطلوب: {fmt}", reply_markup=markup_back)
         bot.register_next_step_handler(msg, step_manual_srv_save_final)
 
 def process_update_single_price(message, service_key):
