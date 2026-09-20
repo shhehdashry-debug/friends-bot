@@ -16,7 +16,7 @@ from datetime import datetime
 # ==========================================
 # 1. إعدادات البوت والـ API والمسؤولين
 # ==========================================
-TOKEN = os.environ.get("TOKEN", '8886482040:AAEzImc8dOE0ZBbsBD7mxpr5mcWaYDItyNc')
+TOKEN = os.environ.get("TOKEN", '8787318525:AAECrmsxL2po9oELDhPifRhuIkawx7uG5FU')
 bot = telebot.TeleBot(TOKEN)
 
 ADMIN_ID = 8758665082
@@ -2393,6 +2393,8 @@ def update_menu_safely(bot_inst, chat_id, message_id, menu_key, markup_kb):
 # ==========================================
 # دالة معالجة الأزرار الموحدة
 # ==========================================
+@bot.callback_query_handler(func=lambda call: True)
+
 def _advanced_service_callback_v2(call):
     data = call.data
     chat_id = call.from_user.id
@@ -2405,7 +2407,7 @@ def _advanced_service_callback_v2(call):
         if key not in SERVICES:
             bot.answer_callback_query(call.id, "❌ الخدمة غير موجودة.", show_alert=True)
             return True
-        paused = not service_is_paused(key)
+        paused = not service_is_paused(SERVICES[key])
         set_service_paused(key, paused)
         bot.answer_callback_query(
             call.id,
@@ -2452,7 +2454,6 @@ def _advanced_service_callback_v2(call):
 
     return False
 
-@bot.callback_query_handler(func=lambda call: True)
 def query(call):
 
     if _advanced_service_callback_v2(call):
@@ -5226,11 +5227,4 @@ def handle_commands(message):
 
 if __name__ == '__main__':
     print("Bot is running...")
-
-    bot.delete_webhook(drop_pending_updates=False)
-
-    bot.infinity_polling(
-        skip_pending=True,
-        timeout=60,
-        long_polling_timeout=60
-    )
+    bot.infinity_polling(skip_pending=True)
