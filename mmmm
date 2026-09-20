@@ -2393,8 +2393,6 @@ def update_menu_safely(bot_inst, chat_id, message_id, menu_key, markup_kb):
 # ==========================================
 # دالة معالجة الأزرار الموحدة
 # ==========================================
-@bot.callback_query_handler(func=lambda call: True)
-
 def _advanced_service_callback_v2(call):
     data = call.data
     chat_id = call.from_user.id
@@ -2454,9 +2452,18 @@ def _advanced_service_callback_v2(call):
 
     return False
 
+@bot.callback_query_handler(func=lambda call: True)
 def query(call):
 
-    if _advanced_service_callback_v2(call):
+    try:
+        if _advanced_service_callback_v2(call):
+            return
+    except Exception as e:
+        print(f"Advanced callback error: {e}")
+        try:
+            bot.answer_callback_query(call.id, "❌ حدث خطأ في معالجة الزر.", show_alert=True)
+        except Exception:
+            pass
         return
     if call.data == "admin_cancel_operation":
         if call.from_user.id != ADMIN_ID:
@@ -5227,4 +5234,14 @@ def handle_commands(message):
 
 if __name__ == '__main__':
     print("Bot is running...")
-    bot.infinity_polling(skip_pending=True)
+    try:
+        bot.delete_webhook(drop_pending_updates=False)
+        print("Webhook deleted successfully.")
+    except Exception as e:
+        print(f"Webhook delete error: {e}")
+
+    bot.infinity_polling(
+        skip_pending=True,
+        timeout=60,
+        long_polling_timeout=60
+    )
