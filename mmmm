@@ -16,7 +16,7 @@ from datetime import datetime
 # ==========================================
 # 1. إعدادات البوت والـ API والمسؤولين
 # ==========================================
-TOKEN = os.environ.get("TOKEN", '8886482040:AAEzImc8dOE0ZBbsBD7mxpr5mcWaYDItyNc')
+TOKEN = os.environ.get("TOKEN", '8886482040:AAGU4g6MTF3VRAxWIHAS5pghc88ZlVP7LQQ')
 bot = telebot.TeleBot(TOKEN)
 
 ADMIN_ID = 8758665082
