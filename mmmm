@@ -2454,11 +2454,6 @@ def _advanced_service_callback_v2(call):
 
 @bot.callback_query_handler(func=lambda call: True)
 def query(call):
-    # الرد الفوري لإيقاف علامة التحميل (الدوّارة) في الزر
-    try:
-        bot.answer_callback_query(call.id)
-    except Exception:
-        pass
 
     if _advanced_service_callback_v2(call):
         return
@@ -2467,13 +2462,13 @@ def query(call):
             bot.answer_callback_query(call.id, "❌ غير مصرح.", show_alert=True)
             return
         cancel_admin_operation(call.from_user.id)
+        bot.answer_callback_query(call.id, "تم إلغاء العملية.")
         return
 
     try:
         chat_id = call.message.chat.id
         message_id = call.message.message_id
         data = call.data
-
 
         if data in ("manual_type_quantity", "manual_type_subscription"):
             if chat_id != ADMIN_ID:
