@@ -16,7 +16,7 @@ from datetime import datetime
 # ==========================================
 # 1. إعدادات البوت والـ API والمسؤولين
 # ==========================================
-TOKEN = os.environ.get("TOKEN", '8886482040:AAGU4g6MTF3VRAxWIHAS5pghc88ZlVP7LQQ')
+TOKEN = os.environ.get("TOKEN", '8787318525:AAECrmsxL2po9oELDhPifRhuIkawx7uG5FU')
 bot = telebot.TeleBot(TOKEN)
 
 ADMIN_ID = 8758665082
@@ -476,6 +476,68 @@ def toggle_maintenance():
         print(f"Error toggling maintenance: {e}")
     return new_val
 
+# ===== أدوات واجهة الأدمن: إعلان + عرض السعر + صيانة ذكية =====
+UI_PRICE_SETTING_KEY = "ui_show_service_prices"
+SMART_MAINT_KEY = "smart_maintenance_message"
+UI_AD_KEY = "ui_global_advertisement"
+
+def get_ui_setting(key, default=""):
+    try:
+        r = supabase.table("settings").select("val_text").eq("key", key).execute()
+        if r.data and r.data[0].get("val_text") is not None:
+            return str(r.data[0]["val_text"])
+    except Exception as e: print(f"UI setting read error: {e}")
+    return default
+
+def set_ui_setting(key, value):
+    try:
+        supabase.table("settings").upsert({"key": key, "val_text": str(value)}, on_conflict="key").execute()
+        return True
+    except Exception as e: print(f"UI setting save error: {e}")
+    return False
+
+def show_service_prices(): return get_ui_setting(UI_PRICE_SETTING_KEY, "0") == "1"
+
+def service_button_text(service, icon="📦"):
+    name = str(service.get("btn_label", service.get("name", "خدمة")))
+    if show_service_prices(): return f"{icon} {name} | {service.get('price', 0)} ن"
+    return f"{icon} {name}"
+
+def smart_maintenance_message(item_key, default="🛠️ هذه الخدمة قيد الصيانة حالياً، حاول لاحقاً."):
+    msg = get_ui_setting(SMART_MAINT_KEY, "").strip()
+    return msg.replace("{item}", str(item_key)) if msg else default
+
+def get_global_advertisement(): return get_ui_setting(UI_AD_KEY, "").strip()
+
+def _admin_ui_tools_menu(chat_id, message_id):
+    ps = "مفعل ✅" if show_service_prices() else "معطل ❌"
+    ad = "موجود 📢" if get_global_advertisement() else "غير موجود"
+    sm = "مخصص ✅" if get_ui_setting(SMART_MAINT_KEY, "").strip() else "افتراضي"
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton(f"📢 إدارة الإعلان ({ad})", callback_data="ui_ad_menu"))
+    kb.add(types.InlineKeyboardButton(f"💰 عرض السعر داخل أزرار الخدمات ({ps})", callback_data="ui_toggle_prices"))
+    kb.add(types.InlineKeyboardButton(f"🛠️ الصيانة الذكية ({sm})", callback_data="ui_smart_maint_menu"))
+    kb.add(types.InlineKeyboardButton("🔙 لوحة الإدارة", callback_data="admin_panel"))
+    bot.edit_message_text("🎛️ **أدوات واجهة البوت**\n\nاختر الميزة:", chat_id, message_id, reply_markup=kb, parse_mode="Markdown")
+
+def process_ui_advertisement(message):
+    if message.from_user.id != ADMIN_ID: return
+    text=(message.text or "").strip()
+    if text in ("0", "إلغاء"):
+        set_ui_setting(UI_AD_KEY, ""); bot.send_message(message.chat.id, "✅ تم حذف الإعلان."); return
+    if not text:
+        msg=bot.send_message(message.chat.id, "❌ الإعلان فارغ، أرسله من جديد:"); bot.register_next_step_handler(msg, process_ui_advertisement); return
+    set_ui_setting(UI_AD_KEY, text[:3500]); bot.send_message(message.chat.id, "✅ تم حفظ الإعلان.")
+
+def process_smart_maintenance_message(message):
+    if message.from_user.id != ADMIN_ID: return
+    text=(message.text or "").strip()
+    if text in ("0", "إلغاء"):
+        set_ui_setting(SMART_MAINT_KEY, ""); bot.send_message(message.chat.id, "✅ رجعت رسالة الصيانة الافتراضية."); return
+    if not text:
+        msg=bot.send_message(message.chat.id, "❌ الرسالة فارغة، أرسلها من جديد:"); bot.register_next_step_handler(msg, process_smart_maintenance_message); return
+    set_ui_setting(SMART_MAINT_KEY, text[:1000]); bot.send_message(message.chat.id, "✅ تم حفظ رسالة الصيانة الذكية.")
+
 def is_item_in_maintenance(item_key):
     return item_key in maintenance_items
 
@@ -749,19 +811,6 @@ try:
                 del SERVICES[b_srv]
 except Exception as e:
     print(f"Error loading deleted services: {e}")
-
-
-# ==========================================
-# ❌ زر إلغاء موحد لعمليات الإدخال
-# ==========================================
-def cancel_operation_markup():
-    """ينشئ زر إلغاء آمن لخطوات الإدخال المتعددة."""
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    markup.add(types.InlineKeyboardButton(
-        "❌ إلغاء العملية",
-        callback_data="admin_cancel_operation"
-    ))
-    return markup
 
 
 # ==========================================
@@ -1041,6 +1090,7 @@ def admin_panel_shortcut(chat_id, message_id=None):
         types.InlineKeyboardButton("⚙️ النظام والإذاعة", callback_data='adm_menu_system', style=get_item_style('adm_menu_system')),
         types.InlineKeyboardButton("🎛️ ترتيب أزرار البوت", callback_data='layout_admin', style=get_item_style('layout_admin')),
         types.InlineKeyboardButton("🔗 إضافة/إدارة زر جديد", callback_data='custom_manage', style=get_item_style('custom_manage')),
+        types.InlineKeyboardButton("🎛️ أدوات الواجهة: إعلان + سعر + صيانة", callback_data='ui_tools_menu', style=get_item_style('ui_tools_menu')),
         types.InlineKeyboardButton("🛠️ صيانة الأزرار والأقسام الشاملة", callback_data='adm_maint_control_menu', style=get_item_style('adm_maint_control_menu')),
         types.InlineKeyboardButton("🎨 تعديل ألوان الأقسام والخدمات", callback_data='adm_select_item_to_recolor', style=get_item_style('adm_select_item_to_recolor')),
         types.InlineKeyboardButton("📱 لوحة تحكم آسيا (أدمن)", callback_data='admin_asiacell_panel', style=get_item_style('admin_asiacell_panel')),
@@ -2072,6 +2122,26 @@ def _handle_layout_callback(call):
     data = call.data
 
     try:
+        if data == "ui_tools_menu":
+            _admin_ui_tools_menu(call.message.chat.id, call.message.message_id); return True
+        if data == "ui_toggle_prices":
+            set_ui_setting(UI_PRICE_SETTING_KEY, "0" if show_service_prices() else "1"); bot.answer_callback_query(call.id, "💰 تم تحديث عرض الأسعار"); _admin_ui_tools_menu(call.message.chat.id, call.message.message_id); return True
+        if data == "ui_ad_menu":
+            cur=get_global_advertisement(); kb=types.InlineKeyboardMarkup(row_width=1); kb.add(types.InlineKeyboardButton("✏️ تغيير الإعلان", callback_data="ui_ad_set"))
+            if cur: kb.add(types.InlineKeyboardButton("🗑️ حذف الإعلان", callback_data="ui_ad_delete"))
+            kb.add(types.InlineKeyboardButton("🔙 أدوات الواجهة", callback_data="ui_tools_menu")); bot.edit_message_text(f"📢 **إدارة الإعلان**\n\n{cur or 'لا يوجد إعلان محفوظ.'}", call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown"); return True
+        if data == "ui_ad_set":
+            msg=bot.send_message(call.message.chat.id, "📢 أرسل نص الإعلان. أرسل 0 لحذفه.", reply_markup=cancel_operation_markup()); bot.register_next_step_handler(msg, process_ui_advertisement); return True
+        if data == "ui_ad_delete":
+            set_ui_setting(UI_AD_KEY, ""); bot.answer_callback_query(call.id, "🗑️ تم حذف الإعلان"); _admin_ui_tools_menu(call.message.chat.id, call.message.message_id); return True
+        if data == "ui_smart_maint_menu":
+            cur=get_ui_setting(SMART_MAINT_KEY, "").strip(); kb=types.InlineKeyboardMarkup(row_width=1); kb.add(types.InlineKeyboardButton("✏️ تعديل رسالة الصيانة", callback_data="ui_smart_maint_set"))
+            if cur: kb.add(types.InlineKeyboardButton("🗑️ الرسالة الافتراضية", callback_data="ui_smart_maint_reset"))
+            kb.add(types.InlineKeyboardButton("🔙 أدوات الواجهة", callback_data="ui_tools_menu")); bot.edit_message_text(f"🛠️ **الصيانة الذكية**\n\n{cur or '🛠️ هذه الخدمة قيد الصيانة حالياً، حاول لاحقاً.'}", call.message.chat.id, call.message.message_id, reply_markup=kb); return True
+        if data == "ui_smart_maint_set":
+            msg=bot.send_message(call.message.chat.id, "🛠️ أرسل رسالة الصيانة. يمكنك استخدام {item} لاسم الخدمة أو القسم. أرسل 0 للإفتراضي.", reply_markup=cancel_operation_markup()); bot.register_next_step_handler(msg, process_smart_maintenance_message); return True
+        if data == "ui_smart_maint_reset":
+            set_ui_setting(SMART_MAINT_KEY, ""); bot.answer_callback_query(call.id, "✅ تم الرجوع للإفتراضي"); _admin_ui_tools_menu(call.message.chat.id, call.message.message_id); return True
         # 🔗 الأزرار المخصصة بروابط متعددة
         if data == "custom_manage":
             _show_custom_buttons_admin(call.message.chat.id, call.message.message_id)
@@ -2468,7 +2538,15 @@ def _advanced_service_callback_v2(call):
 @bot.callback_query_handler(func=lambda call: True)
 def query(call):
 
-    if _advanced_service_callback_v2(call):
+    try:
+        if _advanced_service_callback_v2(call):
+            return
+    except Exception as e:
+        print(f"Advanced callback error: {e}")
+        try:
+            bot.answer_callback_query(call.id, "❌ حدث خطأ في معالجة الزر.", show_alert=True)
+        except Exception:
+            pass
         return
     if call.data == "admin_cancel_operation":
         if call.from_user.id != ADMIN_ID:
@@ -3551,7 +3629,7 @@ def query(call):
 
         elif data == 'our_services':
             if is_item_in_maintenance('our_services') and chat_id != ADMIN_ID:
-                bot.send_message(chat_id, "🛠️ هذا القسم قيد الصيانة حالياً.")
+                bot.send_message(chat_id, smart_maintenance_message(data, "🛠️ هذا القسم قيد الصيانة حالياً."))
                 return
             markup = types.InlineKeyboardMarkup(row_width=1)
             for cat_k, cat_v in CATEGORIES.items():
@@ -3599,7 +3677,7 @@ def query(call):
 
         elif data == 'cat_insta':
             if is_item_in_maintenance('cat_insta') and chat_id != ADMIN_ID:
-                bot.send_message(chat_id, "🛠️ هذا القسم قيد الصيانة حالياً.")
+                bot.send_message(chat_id, smart_maintenance_message(data, "🛠️ هذا القسم قيد الصيانة حالياً."))
                 return
             markup = types.InlineKeyboardMarkup(row_width=1)
             insta_subs = SUB_CATEGORIES.get('cat_insta', [
@@ -3615,7 +3693,7 @@ def query(call):
 
         elif data == 'cat_telegram':
             if is_item_in_maintenance('cat_telegram') and chat_id != ADMIN_ID:
-                bot.send_message(chat_id, "🛠️ هذا القسم قيد الصيانة حالياً.")
+                bot.send_message(chat_id, smart_maintenance_message(data, "🛠️ هذا القسم قيد الصيانة حالياً."))
                 return
             markup = types.InlineKeyboardMarkup(row_width=1)
             for sub in SUB_CATEGORIES.get('cat_telegram', []):
@@ -3629,7 +3707,7 @@ def query(call):
 
         elif data.startswith('cat_') and data not in ['cat_games', 'cat_insta', 'cat_telegram', 'cat_itunes', 'cat_esim']:
             if is_item_in_maintenance(data) and chat_id != ADMIN_ID:
-                bot.send_message(chat_id, "🛠️ هذا القسم قيد الصيانة حالياً.")
+                bot.send_message(chat_id, smart_maintenance_message(data, "🛠️ هذا القسم قيد الصيانة حالياً."))
                 return
                 
             markup = types.InlineKeyboardMarkup(row_width=1)
@@ -3645,7 +3723,7 @@ def query(call):
             for k, v in SERVICES.items():
                 if v.get('category') == data and not v.get('subcat'):
                     if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
-                        markup.add(types.InlineKeyboardButton(f"📦 {v.get('btn_label', v['name'])} ({v.get('price', 0)} ن)", callback_data=k, style=get_item_style(k)))
+                        markup.add(types.InlineKeyboardButton(service_button_text(v, "📦"), callback_data=k, style=get_item_style(k)))
                         found_items = True
 
             if not subs and not found_items:
@@ -3657,7 +3735,7 @@ def query(call):
 
         elif data == 'cat_games':
             if is_item_in_maintenance('cat_games') and chat_id != ADMIN_ID:
-                bot.send_message(chat_id, "🛠️ هذا القسم قيد الصيانة حالياً.")
+                bot.send_message(chat_id, smart_maintenance_message(data, "🛠️ هذا القسم قيد الصيانة حالياً."))
                 return
             markup = types.InlineKeyboardMarkup(row_width=2)
             for sub in SUB_CATEGORIES.get('cat_games', []):
@@ -3673,7 +3751,7 @@ def query(call):
 
         elif data == 'cat_itunes':
             if is_item_in_maintenance('cat_itunes') and chat_id != ADMIN_ID:
-                bot.send_message(chat_id, "🛠️ هذا القسم قيد الصيانة حالياً.")
+                bot.send_message(chat_id, smart_maintenance_message(data, "🛠️ هذا القسم قيد الصيانة حالياً."))
                 return
             markup = types.InlineKeyboardMarkup(row_width=1)
             for k in ['buy_itunes_2', 'buy_itunes_3', 'buy_itunes_4', 'buy_itunes_5', 'buy_itunes_15']:
@@ -3686,7 +3764,7 @@ def query(call):
 
         elif data == 'cat_esim':
             if is_item_in_maintenance('cat_esim') and chat_id != ADMIN_ID:
-                bot.send_message(chat_id, "🛠️ هذا القسم قيد الصيانة حالياً.")
+                bot.send_message(chat_id, smart_maintenance_message(data, "🛠️ هذا القسم قيد الصيانة حالياً."))
                 return
             markup = types.InlineKeyboardMarkup(row_width=1)
             for k in ['buy_esim_month', 'buy_esim_week']:
@@ -3777,7 +3855,7 @@ def query(call):
 
         elif data == 'top_services':
             if is_item_in_maintenance('top_services') and chat_id != ADMIN_ID:
-                bot.send_message(chat_id, "🛠️ هذا القسم قيد الصيانة حالياً.")
+                bot.send_message(chat_id, smart_maintenance_message(data, "🛠️ هذا القسم قيد الصيانة حالياً."))
                 return
             markup = types.InlineKeyboardMarkup(row_width=1)
             markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='start', style=get_item_style('start')))
@@ -3828,7 +3906,7 @@ def query(call):
                     if k in added_keys: continue
                     added_keys.add(k)
                     if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
-                        markup.add(types.InlineKeyboardButton(f"👤 {v.get('name', 'خدمة')}", callback_data=k, style=get_item_style(k)))
+                        markup.add(types.InlineKeyboardButton(service_button_text(v, "👤"), callback_data=k, style=get_item_style(k)))
             markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='cat_insta', style=get_item_style('cat_insta')))
             update_menu_safely(bot, chat_id, message_id, 'insta_fol_sub_menu', markup)
 
@@ -3840,7 +3918,7 @@ def query(call):
                     if k in added_keys: continue
                     added_keys.add(k)
                     if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
-                        markup.add(types.InlineKeyboardButton(f"❤️ {v.get('name', 'خدمة')}", callback_data=k, style=get_item_style(k)))
+                        markup.add(types.InlineKeyboardButton(service_button_text(v, "❤️"), callback_data=k, style=get_item_style(k)))
             markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='cat_insta', style=get_item_style('cat_insta')))
             update_menu_safely(bot, chat_id, message_id, 'open_like_menu', markup)
 
@@ -3852,7 +3930,7 @@ def query(call):
                     if k in added_keys: continue
                     added_keys.add(k)
                     if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
-                        markup.add(types.InlineKeyboardButton(f"👁️ {v.get('name', 'خدمة')}", callback_data=k, style=get_item_style(k)))
+                        markup.add(types.InlineKeyboardButton(service_button_text(v, "👁️"), callback_data=k, style=get_item_style(k)))
             markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='cat_insta', style=get_item_style('cat_insta')))
             update_menu_safely(bot, chat_id, message_id, 'open_view_menu', markup)
 
@@ -3864,7 +3942,7 @@ def query(call):
                     if k in added_keys: continue
                     added_keys.add(k)
                     if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
-                        markup.add(types.InlineKeyboardButton(f"✈️ {v.get('name', 'خدمة')}", callback_data=k, style=get_item_style(k)))
+                        markup.add(types.InlineKeyboardButton(service_button_text(v, "✈️"), callback_data=k, style=get_item_style(k)))
             markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='cat_insta', style=get_item_style('cat_insta')))
             update_menu_safely(bot, chat_id, message_id, 'open_share_menu', markup)
 
@@ -3937,7 +4015,7 @@ def query(call):
 
         elif data == 'ranks_info':
             if is_item_in_maintenance('ranks_info') and chat_id != ADMIN_ID:
-                bot.send_message(chat_id, "🛠️ هذا القسم قيد الصيانة حالياً.")
+                bot.send_message(chat_id, smart_maintenance_message(data, "🛠️ هذا القسم قيد الصيانة حالياً."))
                 return
             lvl = get_user_level(chat_id)
             text = (
@@ -3959,7 +4037,7 @@ def query(call):
 
         elif data == 'referral_menu':
             if is_item_in_maintenance('referral_menu') and chat_id != ADMIN_ID:
-                bot.send_message(chat_id, "🛠️ هذا القسم قيد الصيانة حالياً.")
+                bot.send_message(chat_id, smart_maintenance_message(data, "🛠️ هذا القسم قيد الصيانة حالياً."))
                 return
             referral_menu(chat_id, message_id)
 
@@ -5239,8 +5317,11 @@ def handle_commands(message):
 
 if __name__ == '__main__':
     print("Bot is running...")
-
-    bot.delete_webhook(drop_pending_updates=False)
+    try:
+        bot.delete_webhook(drop_pending_updates=False)
+        print("Webhook deleted successfully.")
+    except Exception as e:
+        print(f"Webhook delete error: {e}")
 
     bot.infinity_polling(
         skip_pending=True,
