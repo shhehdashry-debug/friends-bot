@@ -4790,6 +4790,18 @@ def process_generic_custom_qty(message, base_service_key):
         markup_back.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='our_services', style=get_item_style('our_services')))
         bot.send_message(chat_id, "⚠️ يرجى إدخال أرقام صحيحة فقط:", reply_markup=markup_back)
 
+def cancel_operation_markup():
+    """لوحة زر إلغاء العملية المستخدمة أثناء إدخالات الأدمن."""
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        types.InlineKeyboardButton(
+            "❌ إلغاء العملية",
+            callback_data="admin_cancel_operation"
+        )
+    )
+    return markup
+
+
 # ==============================
 # ❌ نظام إلغاء العمليات للأدمن
 # ==============================
