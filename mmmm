@@ -96,6 +96,17 @@ def set_service_paused(srv_key, paused=True):
     if srv_key not in SERVICES:
         return False
     SERVICES[srv_key][SERVICE_PAUSE_FIELD] = bool(paused)
+    try:
+        payload = json.dumps(SERVICES[srv_key], ensure_ascii=False)
+        supabase.table("custom_services").upsert({
+            "service_key": srv_key,
+            "category": SERVICES[srv_key].get("category"),
+            "subcat": SERVICES[srv_key].get("subcat"),
+            "service_data": payload
+        }, on_conflict="service_key").execute()
+    except Exception as e:
+        # Built-in services may not exist in custom_services; keep local state.
+        print(f"Service pause persistence warning: {e}")
     return True
 
 def clone_service(srv_key, new_key, new_name=None, new_price=None):
@@ -499,62 +510,36 @@ def set_ui_setting(key, value):
 def show_service_prices(): return get_ui_setting(UI_PRICE_SETTING_KEY, "0") == "1"
 
 def get_service_display_price(service):
-    """إرجاع السعر الحقيقي الظاهر على زر الخدمة بدون سقوطه إلى 0 بسبب اختلاف اسم الحقل."""
+    """السعر الظاهر على زر الخدمة.
+    للخدمات ذات tiers/custom_tiers نعرض سعر أول باقة بدلاً من 0.
+    للخدمات العادية نستخدم price.
+    """
     if not isinstance(service, dict):
-        return 0.0
+        return 0
 
-    # 1) خدمات الباقات: خذ أقل سعر صالح من الباقات.
-    for key in ("tiers", "custom_tiers", "tier_list"):
+    for key in ("tiers", "custom_tiers"):
         tiers = service.get(key)
         if isinstance(tiers, list) and tiers:
             prices = []
             for tier in tiers:
-                if not isinstance(tier, dict):
+                try:
+                    price = float(tier.get("price"))
+                    if price >= 0:
+                        prices.append(price)
+                except (TypeError, ValueError, AttributeError):
                     continue
-                for price_key in ("price", "selling_price", "amount"):
-                    try:
-                        value = float(tier.get(price_key))
-                        if value > 0:
-                            prices.append(value)
-                            break
-                    except (TypeError, ValueError):
-                        pass
             if prices:
-                return round(min(prices), 2)
+                return min(prices)
 
-    # 2) الخدمة العادية: جرّب أسماء حقول الأسعار المستخدمة في النسخ المختلفة.
-    for price_key in (
-        "price",
-        "selling_price",
-        "sale_price",
-        "service_price",
-        "amount",
-        "rate",
-    ):
-        try:
-            value = float(service.get(price_key))
-            if value > 0:
-                return round(value, 2)
-        except (TypeError, ValueError):
-            continue
-
-    # 3) آخر fallback للخدمات القديمة التي خزنت السعر باسم cost.
-    # لا نستخدمه إلا إذا لم يوجد أي سعر موجب آخر.
     try:
-        cost = float(service.get("cost"))
-        if cost > 0:
-            return round(cost, 2)
+        return float(service.get("price", 0) or 0)
     except (TypeError, ValueError):
-        pass
-
-    return 0.0
+        return 0
 
 
 def service_button_text(service, icon="📦"):
     name = str(service.get("btn_label", service.get("name", "خدمة")))
-    if show_service_prices():
-        raw_price = get_service_display_price(service)
-        return f"{icon} {name} | {raw_price:g} ن" if raw_price > 0 else f"{icon} {name}"
+    if show_service_prices(): return f"{icon} {name} | {get_service_display_price(service)} ن"
     return f"{icon} {name}"
 
 def smart_maintenance_message(item_key, default="🛠️ هذه الخدمة قيد الصيانة حالياً، حاول لاحقاً."):
@@ -856,6 +841,20 @@ def load_custom_services_from_db():
 
 load_custom_services_from_db()
 
+# Restore individually edited prices for built-in services.
+try:
+    for _key, _srv in list(SERVICES.items()):
+        if _key.startswith("custom_srv_"):
+            continue
+        _r = supabase.table("settings").select("val_text").eq("key", f"price_{_key}").execute()
+        if _r.data and _r.data[0].get("val_text") not in (None, ""):
+            try:
+                _srv["price"] = float(_r.data[0]["val_text"])
+            except (TypeError, ValueError):
+                pass
+except Exception as _e:
+    print(f"Error restoring saved service prices: {_e}")
+
 CATEGORIES = {
     'cat_games': 'قسم الشحن والألعاب 🎮',
     'cat_insta': 'قسم الانستغرام 📸',
@@ -1002,7 +1001,6 @@ def _custom_main_markup_buttons(markup):
 def _show_custom_link_menu(chat_id, message_id, item_id):
     item = _custom_link_item(item_id)
     if not item:
-        bot.answer_callback_query("", "❌ الزر غير موجود", show_alert=True) if False else None
         bot.send_message(chat_id, "❌ هذا الزر لم يعد موجوداً.")
         return
     links = item.get("links", [])
@@ -1596,17 +1594,21 @@ load_custom_categories_from_db()
 
 def load_manual_services_from_supabase_table():
     try:
+        deleted_rows = supabase.table("deleted_services").select("srv_key").execute()
+        deleted_keys = {str(r.get("srv_key")) for r in (deleted_rows.data or [])}
         res = supabase.table("custom_services").select("*").execute()
         if res.data:
             for row in res.data:
                 s_key = row.get("service_key")
                 s_data_str = row.get("service_data")
-                if s_key and s_data_str:
-                    try:
-                        s_dict = json.loads(s_data_str)
+                if not s_key or not s_data_str or str(s_key) in deleted_keys:
+                    continue
+                try:
+                    s_dict = json.loads(s_data_str)
+                    if isinstance(s_dict, dict):
                         SERVICES[s_key] = s_dict
-                    except Exception as parse_err:
-                        print(f"Error parsing manual service {s_key}: {parse_err}")
+                except Exception as parse_err:
+                    print(f"Error parsing manual service {s_key}: {parse_err}")
     except Exception as e:
         print(f"Error loading manual services from table: {e}")
 
@@ -2689,9 +2691,47 @@ def _advanced_service_callback_v2(call):
 
     if data == "recharge_manage":
         bot.answer_callback_query(call.id)
+        _show_recharge_codes_admin(chat_id)
+        return True
+
+    if data.startswith("recharge_code_info|"):
+        code = data.split("|", 1)[1]
+        try:
+            res = supabase.table("vouchers").select("*").eq("code", code).execute()
+            row = res.data[0] if res.data else None
+        except Exception:
+            row = None
+        if not row:
+            bot.answer_callback_query(call.id, "❌ الكود غير موجود.", show_alert=True)
+            return True
+        amount = row.get("amount", 0)
+        bot.answer_callback_query(call.id, f"🎟️ {code} — {amount} نقطة", show_alert=True)
         return True
 
     return False
+
+def _show_recharge_codes_admin(chat_id):
+    """واجهة إدارة أكواد الشحن المحفوظة."""
+    try:
+        res = supabase.table("vouchers").select("*").limit(50).execute()
+        rows = res.data or []
+    except Exception as e:
+        print(f"Recharge management load error: {e}")
+        rows = []
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    if rows:
+        for row in rows[:50]:
+            code = str(row.get("code", ""))
+            amount = row.get("amount", 0)
+            kb.add(types.InlineKeyboardButton(
+                f"🎟️ {code} — {amount} نقطة",
+                callback_data=f"recharge_code_info|{code}"
+            ))
+    else:
+        kb.add(types.InlineKeyboardButton("ℹ️ لا توجد أكواد محفوظة", callback_data="recharge_manage"))
+    kb.add(types.InlineKeyboardButton("🔙 لوحة الإدارة", callback_data="admin_panel"))
+    bot.send_message(chat_id, "🎟️ **إدارة أكواد الشحن**\n\nاختر الكود لعرض تفاصيله:", reply_markup=kb, parse_mode="Markdown")
+
 
 @bot.callback_query_handler(func=lambda call: True)
 def query(call):
@@ -4453,6 +4493,10 @@ def query(call):
 
     except Exception as e:
         print(f"Callback Error: {e}")
+        try:
+            processing_order_users.discard(call.from_user.id)
+        except Exception:
+            pass
 
 # ==========================================
 # معالجات رسائل النصوص والخطوات (Steps)
@@ -4968,7 +5012,7 @@ def cancel_admin_operation(chat_id):
         pending_orders_cache.pop(chat_id, None)
 
     try:
-        _show_admin_panel(chat_id)
+        admin_panel_shortcut(chat_id)
     except Exception:
         bot.send_message(
             chat_id,
@@ -5101,6 +5145,22 @@ def process_update_single_price(message, service_key):
 
         old_price = SERVICES[service_key].get('price', 0)
         SERVICES[service_key]['price'] = new_price
+
+        try:
+            if service_key.startswith("custom_srv_"):
+                supabase.table("custom_services").upsert({
+                    "service_key": service_key,
+                    "category": SERVICES[service_key].get("category"),
+                    "subcat": SERVICES[service_key].get("subcat"),
+                    "service_data": json.dumps(SERVICES[service_key], ensure_ascii=False)
+                }, on_conflict="service_key").execute()
+            else:
+                supabase.table("settings").upsert({
+                    "key": f"price_{service_key}",
+                    "val_text": str(new_price)
+                }, on_conflict="key").execute()
+        except Exception as db_err:
+            print(f"Price persistence warning for {service_key}: {db_err}")
 
         bot.send_message(
             message.chat.id,
