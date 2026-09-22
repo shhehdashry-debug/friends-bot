@@ -792,6 +792,32 @@ def load_sub_categories_from_db():
 
 load_sub_categories_from_db()
 
+# إزالة الأقسام الفرعية الافتراضية القديمة للإنستغرام نهائياً.
+# الخدمات نفسها لا تُحذف؛ سيتم عرضها مباشرة داخل قسم Instagram.
+try:
+    _old_insta_subs = SUB_CATEGORIES.get("cat_insta", [])
+    _blocked_insta_callbacks = {"fol", "like", "view", "share",
+                                "insta_fol_sub_menu", "open_like_menu",
+                                "open_view_menu", "open_share_menu"}
+    _new_insta_subs = [
+        sub for sub in _old_insta_subs
+        if str(sub.get("callback", "")) not in _blocked_insta_callbacks
+        and str(sub.get("name", "")) not in {
+            "👤 قسم المتابعين", "❤️ قسم اللايكات",
+            "👁️ قسم المشاهدات", "✈️ قسم المشاركات"
+        }
+    ]
+    if _old_insta_subs != _new_insta_subs:
+        SUB_CATEGORIES["cat_insta"] = _new_insta_subs
+        if not _new_insta_subs:
+            SUB_CATEGORIES.pop("cat_insta", None)
+        supabase.table("settings").upsert({
+            "key": "custom_sub_categories",
+            "val_text": json.dumps(SUB_CATEGORIES, ensure_ascii=False)
+        }, on_conflict="key").execute()
+except Exception as e:
+    print(f"Instagram built-in subcategories cleanup warning: {e}")
+
 try:
     res_del_cats = supabase.table("deleted_categories").select("cat_key").execute()
     if res_del_cats.data:
@@ -1781,13 +1807,10 @@ def _layout_targets():
         for sub in subs or []:
             cb=str(sub.get("callback", ""))
             if not cb: continue
-            # بعض الأقسام تستخدم callback مباشر، وبعضها sub_...
-            if cb not in ["insta_fol_sub_menu","open_like_menu","open_view_menu","open_share_menu"] and not cb.startswith("sub_"):
+            if not cb.startswith("sub_"):
                 cb="sub_"+cb
             targets.append((cb,f"📂 {sub.get('name',cb)}"))
     for k,title in [
-        ("insta_fol_sub_menu","👤 خدمات المتابعين"),("open_like_menu","❤️ خدمات اللايكات"),
-        ("open_view_menu","👁️ خدمات المشاهدات"),("open_share_menu","✈️ خدمات المشاركات"),
         ("pubg_menu","🎮 خدمات ببجي"),("ff_menu","🔥 خدمات فري فاير"),
         ("ludo_menu","🎲 خدمات لودو"),("coc_menu","⚔️ خدمات كلاش"),
         ("cat_itunes","🍎 خدمات iTunes"),("cat_esim","📶 خدمات eSIM")]:
@@ -1812,21 +1835,19 @@ def _ensure_layout_target(menu_key):
     if key=="our_services":
         items=[(str(k),str(v)) for k,v in CATEGORIES.items()]
     elif key in CATEGORIES:
-        for sub in SUB_CATEGORIES.get(key,[]) or []:
-            cb=str(sub.get("callback",""))
-            if cb and not cb.startswith("sub_") and key!="cat_insta": cb="sub_"+cb
-            if cb: items.append((cb,str(sub.get("name",cb))))
+        # الأقسام الرئيسية تعرض خدماتها مباشرة.
+        # الأقسام الفرعية الديناميكية الأخرى تبقى مدعومة فقط إذا أضافها الأدمن.
+        if key != "cat_insta":
+            for sub in SUB_CATEGORIES.get(key,[]) or []:
+                cb=str(sub.get("callback",""))
+                if cb and not cb.startswith("sub_"): cb="sub_"+cb
+                if cb: items.append((cb,str(sub.get("name",cb))))
         for k,v in SERVICES.items():
-            if v.get("category")==key and not v.get("subcat"):
+            if v.get("category")==key:
                 items.append((str(k),str(v.get("btn_label",v.get("name","خدمة")))))
     elif key.startswith("sub_"):
         for k,v in SERVICES.items():
             if str(v.get("subcat",""))==key:
-                items.append((str(k),str(v.get("btn_label",v.get("name","خدمة")))))
-    elif key in ["insta_fol_sub_menu","open_like_menu","open_view_menu","open_share_menu"]:
-        wanted={"insta_fol_sub_menu":"fol","open_like_menu":"like","open_view_menu":"view","open_share_menu":"share"}[key]
-        for k,v in SERVICES.items():
-            if v.get("category")=="cat_insta" and (v.get("subcat")==wanted or wanted in v.get("name","")):
                 items.append((str(k),str(v.get("btn_label",v.get("name","خدمة")))))
     if not items: return None
     data[key]={"buttons":[{"callback":cb,"text":txt} for cb,txt in items],"order":[cb for cb,_ in items],"rows":[[cb] for cb,_ in items],"hidden":[],"columns":1}
@@ -2934,17 +2955,9 @@ def query(call):
             cat_key = data.replace('addsrv_cat_', '')
             temp_add_service[chat_id] = {'category': cat_key}
             subs = list(SUB_CATEGORIES.get(cat_key, []))
+            # Instagram لم يعد يحتوي أقساماً فرعية افتراضية.
             if cat_key == 'cat_insta':
-                default_insta_subs = [
-                    {'name': '👤 قسم المتابعين', 'callback': 'fol'},
-                    {'name': '❤️ قسم اللايكات', 'callback': 'like'},
-                    {'name': '👁️ قسم المشاهدات', 'callback': 'view'},
-                    {'name': '✈️ قسم المشاركات', 'callback': 'share'}
-                ]
-                existing_callbacks = {s.get('callback') for s in subs}
-                for d_sub in default_insta_subs:
-                    if d_sub['callback'] not in existing_callbacks:
-                        subs.append(d_sub)
+                subs = []
 
             if subs:
                 markup = types.InlineKeyboardMarkup(row_width=1)
@@ -3679,16 +3692,34 @@ def query(call):
             if is_item_in_maintenance('cat_insta') and chat_id != ADMIN_ID:
                 bot.send_message(chat_id, smart_maintenance_message(data, "🛠️ هذا القسم قيد الصيانة حالياً."))
                 return
+
             markup = types.InlineKeyboardMarkup(row_width=1)
-            insta_subs = SUB_CATEGORIES.get('cat_insta', [
-                {'name': '👤 قسم المتابعين', 'callback': 'insta_fol_sub_menu'},
-                {'name': '❤️ قسم اللايكات', 'callback': 'open_like_menu'},
-                {'name': '👁️ قسم المشاهدات', 'callback': 'open_view_menu'},
-                {'name': '✈️ قسم المشاركات', 'callback': 'open_share_menu'}
-            ])
-            for sub in insta_subs:
-                markup.add(types.InlineKeyboardButton(sub['name'], callback_data=sub.get('callback', 'start'), style=get_item_style(sub.get('callback', 'start'))))
-            markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='our_services', style=get_item_style('our_services')))
+            found_items = False
+            for k, v in SERVICES.items():
+                if v.get('category') != 'cat_insta':
+                    continue
+                if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
+                    markup.add(
+                        types.InlineKeyboardButton(
+                            service_button_text(v, "📸"),
+                            callback_data=k,
+                            style=get_item_style(k)
+                        )
+                    )
+                    found_items = True
+
+            if not found_items:
+                markup.add(types.InlineKeyboardButton(
+                    "⚠️ لا توجد خدمات Instagram حالياً",
+                    callback_data='ignore',
+                    style=get_item_style('ignore')
+                ))
+
+            markup.add(types.InlineKeyboardButton(
+                "🔙 رجوع",
+                callback_data='our_services',
+                style=get_item_style('our_services')
+            ))
             update_menu_safely(bot, chat_id, message_id, 'cat_insta', markup)
 
         elif data == 'cat_telegram':
@@ -3894,57 +3925,6 @@ def query(call):
                 return
             msg = bot.send_message(chat_id, "🔄 **أرسل الآيدي (ID) الخاص بالشخص المراد التحويل له:**", parse_mode="Markdown")
             bot.register_next_step_handler(msg, process_transfer_target_id)
-
-        elif data == 'insta_fol_sub_menu':
-            if is_item_in_maintenance('insta_fol_sub_menu') and chat_id != ADMIN_ID:
-                bot.send_message(chat_id, "🛠️ هذا القسم فرعي قيد الصيانة حالياً.")
-                return
-            markup = types.InlineKeyboardMarkup(row_width=1)
-            added_keys = set()
-            for k, v in SERVICES.items():
-                if v.get('category') == 'cat_insta' and (v.get('subcat') == 'fol' or 'متابع' in v.get('name', '')):
-                    if k in added_keys: continue
-                    added_keys.add(k)
-                    if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
-                        markup.add(types.InlineKeyboardButton(service_button_text(v, "👤"), callback_data=k, style=get_item_style(k)))
-            markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='cat_insta', style=get_item_style('cat_insta')))
-            update_menu_safely(bot, chat_id, message_id, 'insta_fol_sub_menu', markup)
-
-        elif data == 'open_like_menu':
-            markup = types.InlineKeyboardMarkup(row_width=1)
-            added_keys = set()
-            for k, v in SERVICES.items():
-                if v.get('category') == 'cat_insta' and (v.get('subcat') == 'like' or 'لايك' in v.get('name', '')):
-                    if k in added_keys: continue
-                    added_keys.add(k)
-                    if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
-                        markup.add(types.InlineKeyboardButton(service_button_text(v, "❤️"), callback_data=k, style=get_item_style(k)))
-            markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='cat_insta', style=get_item_style('cat_insta')))
-            update_menu_safely(bot, chat_id, message_id, 'open_like_menu', markup)
-
-        elif data == 'open_view_menu':
-            markup = types.InlineKeyboardMarkup(row_width=1)
-            added_keys = set()
-            for k, v in SERVICES.items():
-                if v.get('category') == 'cat_insta' and (v.get('subcat') == 'view' or 'مشاهد' in v.get('name', '')):
-                    if k in added_keys: continue
-                    added_keys.add(k)
-                    if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
-                        markup.add(types.InlineKeyboardButton(service_button_text(v, "👁️"), callback_data=k, style=get_item_style(k)))
-            markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='cat_insta', style=get_item_style('cat_insta')))
-            update_menu_safely(bot, chat_id, message_id, 'open_view_menu', markup)
-
-        elif data == 'open_share_menu':
-            markup = types.InlineKeyboardMarkup(row_width=1)
-            added_keys = set()
-            for k, v in SERVICES.items():
-                if v.get('category') == 'cat_insta' and (v.get('subcat') == 'share' or 'مشارك' in v.get('name', '')):
-                    if k in added_keys: continue
-                    added_keys.add(k)
-                    if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
-                        markup.add(types.InlineKeyboardButton(service_button_text(v, "✈️"), callback_data=k, style=get_item_style(k)))
-            markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='cat_insta', style=get_item_style('cat_insta')))
-            update_menu_safely(bot, chat_id, message_id, 'open_share_menu', markup)
 
         elif data == 'pubg_menu':
             markup = types.InlineKeyboardMarkup(row_width=1)
