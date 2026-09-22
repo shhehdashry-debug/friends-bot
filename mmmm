@@ -2079,6 +2079,19 @@ def _show_layout_item(call, menu_key, row_index):
     )
 
 
+def _layout_cb_at(cfg, row_index, col_index):
+    """يرجع callback الحقيقي من موقع الصف/العمود. يمنع كسر callback إذا احتوى على |."""
+    try:
+        rows = cfg.get("rows", [])
+        row_index = int(row_index)
+        col_index = int(col_index)
+        if 0 <= row_index < len(rows) and 0 <= col_index < len(rows[row_index]):
+            return str(rows[row_index][col_index])
+    except Exception:
+        pass
+    return None
+
+
 def _show_layout_move_buttons(call, menu_key):
     """اختيار زر محدد ثم نقله إلى الصف السابق/التالي."""
     cfg = _normalize_layout_cfg(menu_key)
@@ -2086,10 +2099,11 @@ def _show_layout_move_buttons(call, menu_key):
 
     kb = types.InlineKeyboardMarkup(row_width=1)
     for row_index, row in enumerate(cfg.get("rows", [])):
-        for cb in row:
+        for col_index, cb in enumerate(row):
             kb.add(types.InlineKeyboardButton(
                 f"↕️ {labels.get(cb, cb)}",
-                callback_data=f"layout_move_pick|{menu_key}|{cb}"
+                # لا نضع callback نفسه هنا لأنه قد يحتوي على |.
+                callback_data=f"layout_move_pick|{menu_key}|{row_index}|{col_index}"
             ))
 
     kb.add(types.InlineKeyboardButton(
@@ -2122,13 +2136,13 @@ def _show_layout_move_controls(call, menu_key, cb):
     if row_index > 0:
         kb.add(types.InlineKeyboardButton(
             "⬆️ الصف السابق",
-            callback_data=f"layout_button_move|{menu_key}|{cb}|up"
+            callback_data=f"layout_button_move|{menu_key}|{row_index}|{rows[row_index].index(cb)}|up"
         ))
 
     if row_index < len(rows) - 1:
         kb.add(types.InlineKeyboardButton(
             "⬇️ الصف التالي",
-            callback_data=f"layout_button_move|{menu_key}|{cb}|down"
+            callback_data=f"layout_button_move|{menu_key}|{row_index}|{rows[row_index].index(cb)}|down"
         ))
 
     kb.add(types.InlineKeyboardButton(
@@ -2201,12 +2215,12 @@ def _show_layout_hide_buttons(call, menu_key):
     hidden = set(cfg.get("hidden", []))
 
     kb = types.InlineKeyboardMarkup(row_width=1)
-    for row in cfg.get("rows", []):
-        for cb in row:
+    for row_index, row in enumerate(cfg.get("rows", [])):
+        for col_index, cb in enumerate(row):
             state = "🚫 مخفي" if cb in hidden else "✅ ظاهر"
             kb.add(types.InlineKeyboardButton(
                 f"{state} | {labels.get(cb, cb)}",
-                callback_data=f"layout_hide_cb|{menu_key}|{cb}"
+                callback_data=f"layout_hide_cb|{menu_key}|{row_index}|{col_index}"
             ))
 
     kb.add(types.InlineKeyboardButton(
@@ -2383,11 +2397,12 @@ def _handle_layout_callback(call):
             cfg = _normalize_layout_cfg(key)
             labels = _layout_labels(cfg)
             kb = types.InlineKeyboardMarkup(row_width=1)
-            for cb in cfg.get("order", []):
-                kb.add(types.InlineKeyboardButton(
-                    labels.get(cb, cb)[:40],
-                    callback_data=f"layout_pair_first|{key}|{cb}"
-                ))
+            for row_index, row in enumerate(cfg.get("rows", [])):
+                for col_index, cb in enumerate(row):
+                    kb.add(types.InlineKeyboardButton(
+                        labels.get(cb, cb)[:40],
+                        callback_data=f"layout_pair_first|{key}|{row_index}|{col_index}"
+                    ))
             kb.add(types.InlineKeyboardButton("🔙 رجوع", callback_data=f"layout_menu|{key}"))
             bot.edit_message_text(
                 "🔗 **اختار الزر الأول**",
@@ -2397,16 +2412,32 @@ def _handle_layout_callback(call):
             return True
 
         if data.startswith("layout_pair_first|"):
-            _, key, first = data.split("|", 2)
-            cfg = _normalize_layout_cfg(key)
+            parts = data.split("|")
+            if len(parts) == 4:
+                _, key, row_s, col_s = parts
+                first_row, first_col = row_s, col_s
+                cfg = _normalize_layout_cfg(key)
+                first = _layout_cb_at(cfg, row_s, col_s)
+            else:
+                _, key, first = data.split("|", 2)
+                cfg = _normalize_layout_cfg(key)
+                pos = next(((ri, ci) for ri, rr in enumerate(cfg.get("rows", [])) for ci, x in enumerate(rr) if x == first), None)
+                if pos:
+                    first_row, first_col = str(pos[0]), str(pos[1])
+                else:
+                    first_row, first_col = "-1", "-1"
+            if not first:
+                bot.answer_callback_query(call.id, "❌ الزر غير موجود", show_alert=True)
+                return True
             labels = _layout_labels(cfg)
             kb = types.InlineKeyboardMarkup(row_width=1)
-            for cb in cfg.get("order", []):
-                if cb != first:
-                    kb.add(types.InlineKeyboardButton(
-                        labels.get(cb, cb)[:40],
-                        callback_data=f"layout_pair_do|{key}|{first}|{cb}"
-                    ))
+            for row_index, row in enumerate(cfg.get("rows", [])):
+                for col_index, cb in enumerate(row):
+                    if cb != first:
+                        kb.add(types.InlineKeyboardButton(
+                            labels.get(cb, cb)[:40],
+                            callback_data=f"layout_pair_do|{key}|{first_row}|{first_col}|{row_index}|{col_index}"
+                        ))
             kb.add(types.InlineKeyboardButton(
                 "🔙 اختيار الزر الأول",
                 callback_data=f"layout_pair_start|{key}"
@@ -2420,7 +2451,19 @@ def _handle_layout_callback(call):
             return True
 
         if data.startswith("layout_pair_do|"):
-            _, key, first, second = data.split("|", 3)
+            parts = data.split("|")
+            if len(parts) == 6:
+                _, key, first_r, first_c, second_r, second_c = parts
+                cfg_now = _normalize_layout_cfg(key)
+                first = _layout_cb_at(cfg_now, first_r, first_c)
+                second = _layout_cb_at(cfg_now, second_r, second_c)
+            else:
+                # توافق مع callback قديم.
+                _, key, first, second = data.split("|", 3)
+                cfg_now = _normalize_layout_cfg(key)
+            if not first or not second or first == second:
+                bot.answer_callback_query(call.id, "❌ أحد الأزرار غير موجود", show_alert=True)
+                return True
             all_data = dict(_load_button_layouts())
             cfg = dict(all_data.get(key, {}))
             rows = [list(r) for r in cfg.get("rows", [])]
@@ -2456,11 +2499,32 @@ def _handle_layout_callback(call):
             return True
 
         if data.startswith("layout_move_pick|"):
+            parts = data.split("|")
+            if len(parts) == 4:
+                _, key, row_s, col_s = parts
+                cfg = _normalize_layout_cfg(key)
+                cb = _layout_cb_at(cfg, row_s, col_s)
+                if not cb:
+                    bot.answer_callback_query(call.id, "❌ الزر غير موجود", show_alert=True)
+                    return True
+                _show_layout_move_controls(call, key, cb)
+                return True
+            # توافق مع أزرار قديمة كانت ترسل callback نفسه.
             _, key, cb = data.split("|", 2)
             _show_layout_move_controls(call, key, cb)
             return True
 
         if data.startswith("layout_button_move|"):
+            parts = data.split("|")
+            if len(parts) == 5:
+                _, key, row_s, col_s, direction = parts
+                cfg = _normalize_layout_cfg(key)
+                cb = _layout_cb_at(cfg, row_s, col_s)
+                if not cb:
+                    bot.answer_callback_query(call.id, "❌ الزر غير موجود", show_alert=True)
+                    return True
+                return _move_button_between_rows(call, key, cb, direction)
+            # توافق مع callback قديم.
             _, key, cb, direction = data.split("|", 3)
             return _move_button_between_rows(call, key, cb, direction)
 
@@ -2514,7 +2578,19 @@ def _handle_layout_callback(call):
             return True
 
         if data.startswith("layout_hide_cb|"):
-            _, key, cb = data.split("|", 2)
+            parts = data.split("|")
+            if len(parts) == 4:
+                _, key, row_s, col_s = parts
+                cfg = _normalize_layout_cfg(key)
+                cb = _layout_cb_at(cfg, row_s, col_s)
+                if not cb:
+                    bot.answer_callback_query(call.id, "❌ الزر غير موجود", show_alert=True)
+                    return True
+            else:
+                # توافق مع callback قديم.
+                _, key, cb = data.split("|", 2)
+                cfg = _normalize_layout_cfg(key)
+
             all_data = dict(_load_button_layouts())
             cfg = dict(all_data.get(key, {}))
             hidden = set(cfg.get("hidden", []))
