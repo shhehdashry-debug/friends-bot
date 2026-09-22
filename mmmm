@@ -2596,7 +2596,32 @@ def query(call):
             ask_manual_service_values(chat_id)
             return
 
-        if data.startswith(("layout_", "custom_")):
+        # فصل أزرار المستخدم العامة عن أزرار إدارة الأدمن.
+        # custom_menu|... يفتح قائمة الزر المخصص للمستخدم.
+        if data.startswith("custom_menu|"):
+            item_id = data.split("|", 1)[1]
+            _show_custom_link_menu(chat_id, message_id, item_id)
+            try:
+                bot.answer_callback_query(call.id)
+            except Exception:
+                pass
+            return
+
+        # أدوات الواجهة والترتيب وإدارة الأزرار: للأدمن فقط.
+        if (
+            data == "ui_tools_menu"
+            or data.startswith("ui_")
+            or data.startswith("layout_")
+            or data in ("custom_manage", "custom_add")
+            or data.startswith((
+                "custom_admin|",
+                "custom_link_add|",
+                "custom_link_del|",
+                "custom_rename|",
+                "custom_toggle|",
+                "custom_del|"
+            ))
+        ):
             if _handle_layout_callback(call):
                 return
 
