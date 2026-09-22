@@ -498,9 +498,63 @@ def set_ui_setting(key, value):
 
 def show_service_prices(): return get_ui_setting(UI_PRICE_SETTING_KEY, "0") == "1"
 
+def get_service_display_price(service):
+    """إرجاع السعر الحقيقي الظاهر على زر الخدمة بدون سقوطه إلى 0 بسبب اختلاف اسم الحقل."""
+    if not isinstance(service, dict):
+        return 0.0
+
+    # 1) خدمات الباقات: خذ أقل سعر صالح من الباقات.
+    for key in ("tiers", "custom_tiers", "tier_list"):
+        tiers = service.get(key)
+        if isinstance(tiers, list) and tiers:
+            prices = []
+            for tier in tiers:
+                if not isinstance(tier, dict):
+                    continue
+                for price_key in ("price", "selling_price", "amount"):
+                    try:
+                        value = float(tier.get(price_key))
+                        if value > 0:
+                            prices.append(value)
+                            break
+                    except (TypeError, ValueError):
+                        pass
+            if prices:
+                return round(min(prices), 2)
+
+    # 2) الخدمة العادية: جرّب أسماء حقول الأسعار المستخدمة في النسخ المختلفة.
+    for price_key in (
+        "price",
+        "selling_price",
+        "sale_price",
+        "service_price",
+        "amount",
+        "rate",
+    ):
+        try:
+            value = float(service.get(price_key))
+            if value > 0:
+                return round(value, 2)
+        except (TypeError, ValueError):
+            continue
+
+    # 3) آخر fallback للخدمات القديمة التي خزنت السعر باسم cost.
+    # لا نستخدمه إلا إذا لم يوجد أي سعر موجب آخر.
+    try:
+        cost = float(service.get("cost"))
+        if cost > 0:
+            return round(cost, 2)
+    except (TypeError, ValueError):
+        pass
+
+    return 0.0
+
+
 def service_button_text(service, icon="📦"):
     name = str(service.get("btn_label", service.get("name", "خدمة")))
-    if show_service_prices(): return f"{icon} {name} | {service.get('price', 0)} ن"
+    if show_service_prices():
+        raw_price = get_service_display_price(service)
+        return f"{icon} {name} | {raw_price:g} ن" if raw_price > 0 else f"{icon} {name}"
     return f"{icon} {name}"
 
 def smart_maintenance_message(item_key, default="🛠️ هذه الخدمة قيد الصيانة حالياً، حاول لاحقاً."):
@@ -538,16 +592,49 @@ def process_smart_maintenance_message(message):
         msg=bot.send_message(message.chat.id, "❌ الرسالة فارغة، أرسلها من جديد:"); bot.register_next_step_handler(msg, process_smart_maintenance_message); return
     set_ui_setting(SMART_MAINT_KEY, text[:1000]); bot.send_message(message.chat.id, "✅ تم حفظ رسالة الصيانة الذكية.")
 
+SMART_MAINT_ITEMS_KEY = "smart_maintenance_items"
+
+def _load_maintenance_items():
+    """تحميل الخدمات الموجودة تحت الصيانة من Supabase."""
+    global maintenance_items
+    try:
+        r = supabase.table("settings").select("val_text").eq("key", SMART_MAINT_ITEMS_KEY).execute()
+        if r.data and r.data[0].get("val_text"):
+            raw = json.loads(str(r.data[0]["val_text"]))
+            if isinstance(raw, list):
+                maintenance_items = set(str(x) for x in raw)
+    except Exception as e:
+        print(f"Smart maintenance load error: {e}")
+    return maintenance_items
+
+def _save_maintenance_items():
+    """حفظ قائمة الخدمات تحت الصيانة بشكل دائم."""
+    try:
+        supabase.table("settings").upsert({
+            "key": SMART_MAINT_ITEMS_KEY,
+            "val_text": json.dumps(sorted(maintenance_items), ensure_ascii=False)
+        }, on_conflict="key").execute()
+        return True
+    except Exception as e:
+        print(f"Smart maintenance save error: {e}")
+        return False
+
 def is_item_in_maintenance(item_key):
-    return item_key in maintenance_items
+    return str(item_key) in maintenance_items
 
 def toggle_item_maintenance(item_key):
+    item_key = str(item_key)
     if item_key in maintenance_items:
         maintenance_items.remove(item_key)
-        return False
+        enabled = False
     else:
         maintenance_items.add(item_key)
-        return True
+        enabled = True
+    _save_maintenance_items()
+    return enabled
+
+# تحميل حالة الصيانة عند تشغيل البوت
+_load_maintenance_items()
 
 MENU_DESC_CACHE = {}
 MENU_DESC_CACHE_TTL = 60  # ثانية
@@ -2156,9 +2243,59 @@ def _handle_layout_callback(call):
         if data == "ui_ad_delete":
             set_ui_setting(UI_AD_KEY, ""); bot.answer_callback_query(call.id, "🗑️ تم حذف الإعلان"); _admin_ui_tools_menu(call.message.chat.id, call.message.message_id); return True
         if data == "ui_smart_maint_menu":
-            cur=get_ui_setting(SMART_MAINT_KEY, "").strip(); kb=types.InlineKeyboardMarkup(row_width=1); kb.add(types.InlineKeyboardButton("✏️ تعديل رسالة الصيانة", callback_data="ui_smart_maint_set"))
-            if cur: kb.add(types.InlineKeyboardButton("🗑️ الرسالة الافتراضية", callback_data="ui_smart_maint_reset"))
-            kb.add(types.InlineKeyboardButton("🔙 أدوات الواجهة", callback_data="ui_tools_menu")); bot.edit_message_text(f"🛠️ **الصيانة الذكية**\n\n{cur or '🛠️ هذه الخدمة قيد الصيانة حالياً، حاول لاحقاً.'}", call.message.chat.id, call.message.message_id, reply_markup=kb); return True
+            cur=get_ui_setting(SMART_MAINT_KEY, "").strip()
+            kb=types.InlineKeyboardMarkup(row_width=1)
+            kb.add(types.InlineKeyboardButton("🛠️ اختيار الخدمات للصيانة", callback_data="ui_smart_maint_services"))
+            kb.add(types.InlineKeyboardButton("✏️ تعديل رسالة الصيانة", callback_data="ui_smart_maint_set"))
+            if cur:
+                kb.add(types.InlineKeyboardButton("🗑️ الرسالة الافتراضية", callback_data="ui_smart_maint_reset"))
+            kb.add(types.InlineKeyboardButton("🔙 أدوات الواجهة", callback_data="ui_tools_menu"))
+            bot.edit_message_text(
+                f"🛠️ **الصيانة الذكية**\n\n{cur or '🛠️ هذه الخدمة قيد الصيانة حالياً، حاول لاحقاً.'}\n\nاختر (اختيار الخدمات للصيانة) لتحديد الخدمات التي تريد إيقافها.",
+                call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown"
+            )
+            return True
+
+        if data == "ui_smart_maint_services":
+            _load_maintenance_items()
+            kb=types.InlineKeyboardMarkup(row_width=1)
+            if not SERVICES:
+                kb.add(types.InlineKeyboardButton("🔙 الصيانة الذكية", callback_data="ui_smart_maint_menu"))
+            else:
+                for srv_key, srv in SERVICES.items():
+                    name=str(srv.get("btn_label", srv.get("name", srv_key)))
+                    status="🔴 تحت الصيانة" if is_item_in_maintenance(srv_key) else "🟢 تعمل"
+                    kb.add(types.InlineKeyboardButton(
+                        f"{status} | {name[:48]}",
+                        callback_data=f"smart_maint_service|{srv_key}"
+                    ))
+                kb.add(types.InlineKeyboardButton("🔙 الصيانة الذكية", callback_data="ui_smart_maint_menu"))
+            bot.edit_message_text(
+                "🛠️ **اختيار الخدمات للصيانة**\n\nاضغط على الخدمة لتبديل حالتها:\n🟢 تعمل → 🔴 تحت الصيانة → 🟢 تعمل",
+                call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown"
+            )
+            return True
+
+        if data.startswith("smart_maint_service|"):
+            srv_key=data.split("|", 1)[1]
+            if srv_key not in SERVICES:
+                bot.answer_callback_query(call.id, "❌ الخدمة غير موجودة.", show_alert=True)
+                return True
+            enabled=toggle_item_maintenance(srv_key)
+            bot.answer_callback_query(
+                call.id,
+                "🔴 تم وضع الخدمة تحت الصيانة" if enabled else "🟢 تم تفعيل الخدمة"
+            )
+            # إعادة رسم القائمة حتى تظهر الحالة الجديدة مباشرةً.
+            _load_maintenance_items()
+            kb=types.InlineKeyboardMarkup(row_width=1)
+            for key, srv in SERVICES.items():
+                name=str(srv.get("btn_label", srv.get("name", key)))
+                status="🔴 تحت الصيانة" if is_item_in_maintenance(key) else "🟢 تعمل"
+                kb.add(types.InlineKeyboardButton(f"{status} | {name[:48]}", callback_data=f"smart_maint_service|{key}"))
+            kb.add(types.InlineKeyboardButton("🔙 الصيانة الذكية", callback_data="ui_smart_maint_menu"))
+            bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=kb)
+            return True
         if data == "ui_smart_maint_set":
             msg=bot.send_message(call.message.chat.id, "🛠️ أرسل رسالة الصيانة. يمكنك استخدام {item} لاسم الخدمة أو القسم. أرسل 0 للإفتراضي.", reply_markup=cancel_operation_markup()); bot.register_next_step_handler(msg, process_smart_maintenance_message); return True
         if data == "ui_smart_maint_reset":
@@ -2619,7 +2756,8 @@ def query(call):
                 "custom_link_del|",
                 "custom_rename|",
                 "custom_toggle|",
-                "custom_del|"
+                "custom_del|",
+                "smart_maint_service|"
             ))
         ):
             if _handle_layout_callback(call):
@@ -3083,7 +3221,7 @@ def query(call):
         elif data == 'adm_edit_single_price':
             markup = types.InlineKeyboardMarkup(row_width=2)
             for key, val in SERVICES.items():
-                markup.add(types.InlineKeyboardButton(f"{val['name']} ({val.get('price', 0)} ن)", callback_data=f"setprc_{key}", style=get_item_style(key)))
+                markup.add(types.InlineKeyboardButton(f"{val['name']} ({get_service_display_price(val)} ن)", callback_data=f"setprc_{key}", style=get_item_style(key)))
             markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='adm_menu_finance', style=get_item_style('adm_menu_finance')))
             bot.edit_message_text("✏️ **اختر الخدمة المراد تعديل سعرها:**", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
             return
@@ -3686,7 +3824,7 @@ def query(call):
                     if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
                         btn_text = f"{v.get('btn_label', v['name'])}"
                         if 'price' in v:
-                            btn_text += f" ({v.get('price', 0)} ن)"
+                            btn_text += f" ({get_service_display_price(v)} ن)"
                         
                         markup.add(types.InlineKeyboardButton(btn_text, callback_data=k, style=get_item_style(k)))
                         found_services = True
@@ -3814,7 +3952,7 @@ def query(call):
                 if k in SERVICES:
                     s_data = SERVICES[k]
                     if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
-                        markup.add(types.InlineKeyboardButton(f"🍎 {s_data.get('btn_label', s_data['name'])} ({s_data.get('price', 0)} ن)", callback_data=k, style=get_item_style(k)))
+                        markup.add(types.InlineKeyboardButton(f"🍎 {s_data.get('btn_label', s_data['name'])} ({get_service_display_price(s_data)} ن)", callback_data=k, style=get_item_style(k)))
             markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='our_services', style=get_item_style('our_services')))
             update_menu_safely(bot, chat_id, message_id, 'cat_itunes', markup)
 
@@ -3827,7 +3965,7 @@ def query(call):
                 if k in SERVICES:
                     s_data = SERVICES[k]
                     if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
-                        markup.add(types.InlineKeyboardButton(f"📱 {s_data.get('btn_label', s_data['name'])} ({s_data.get('price', 0)} ن)", callback_data=k, style=get_item_style(k)))
+                        markup.add(types.InlineKeyboardButton(f"📱 {s_data.get('btn_label', s_data['name'])} ({get_service_display_price(s_data)} ن)", callback_data=k, style=get_item_style(k)))
             markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='our_services', style=get_item_style('our_services')))
             update_menu_safely(bot, chat_id, message_id, 'cat_esim', markup)
 
@@ -3959,7 +4097,7 @@ def query(call):
                     added_keys.add(k)
                     s_data = SERVICES[k]
                     if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
-                        markup.add(types.InlineKeyboardButton(f"{s_data.get('btn_label', s_data['name'])} ({s_data.get('price', 0)} ن)", callback_data=k, style=get_item_style(k)))
+                        markup.add(types.InlineKeyboardButton(f"{s_data.get('btn_label', s_data['name'])} ({get_service_display_price(s_data)} ن)", callback_data=k, style=get_item_style(k)))
             markup.add(types.InlineKeyboardButton("🔙 رجوع للألعاب", callback_data='cat_games', style=get_item_style('cat_games')))
             update_menu_safely(bot, chat_id, message_id, 'pubg_menu', markup)
 
@@ -3971,7 +4109,7 @@ def query(call):
                     added_keys.add(k)
                     s_data = SERVICES[k]
                     if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
-                        markup.add(types.InlineKeyboardButton(f"{s_data.get('btn_label', s_data['name'])} ({s_data.get('price', 0)} ن)", callback_data=k, style=get_item_style(k)))
+                        markup.add(types.InlineKeyboardButton(f"{s_data.get('btn_label', s_data['name'])} ({get_service_display_price(s_data)} ن)", callback_data=k, style=get_item_style(k)))
             markup.add(types.InlineKeyboardButton("🔙 رجوع للألعاب", callback_data='cat_games', style=get_item_style('cat_games')))
             update_menu_safely(bot, chat_id, message_id, 'ff_menu', markup)
 
@@ -3983,7 +4121,7 @@ def query(call):
                     added_keys.add(k)
                     s_data = SERVICES[k]
                     if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
-                        markup.add(types.InlineKeyboardButton(f"{s_data.get('btn_label', s_data['name'])} ({s_data.get('price', 0)} ن)", callback_data=k, style=get_item_style(k)))
+                        markup.add(types.InlineKeyboardButton(f"{s_data.get('btn_label', s_data['name'])} ({get_service_display_price(s_data)} ن)", callback_data=k, style=get_item_style(k)))
             markup.add(types.InlineKeyboardButton("🔙 رجوع للألعاب", callback_data='cat_games', style=get_item_style('cat_games')))
             update_menu_safely(bot, chat_id, message_id, 'ludo_menu', markup)
 
@@ -3995,7 +4133,7 @@ def query(call):
                     added_keys.add(k)
                     s_data = SERVICES[k]
                     if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
-                        markup.add(types.InlineKeyboardButton(f"{s_data.get('btn_label', s_data['name'])} ({s_data.get('price', 0)} ن)", callback_data=k, style=get_item_style(k)))
+                        markup.add(types.InlineKeyboardButton(f"{s_data.get('btn_label', s_data['name'])} ({get_service_display_price(s_data)} ن)", callback_data=k, style=get_item_style(k)))
             markup.add(types.InlineKeyboardButton("🔙 رجوع للألعاب", callback_data='cat_games', style=get_item_style('cat_games')))
             update_menu_safely(bot, chat_id, message_id, 'coc_menu', markup)
 
