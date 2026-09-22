@@ -96,17 +96,6 @@ def set_service_paused(srv_key, paused=True):
     if srv_key not in SERVICES:
         return False
     SERVICES[srv_key][SERVICE_PAUSE_FIELD] = bool(paused)
-    try:
-        payload = json.dumps(SERVICES[srv_key], ensure_ascii=False)
-        supabase.table("custom_services").upsert({
-            "service_key": srv_key,
-            "category": SERVICES[srv_key].get("category"),
-            "subcat": SERVICES[srv_key].get("subcat"),
-            "service_data": payload
-        }, on_conflict="service_key").execute()
-    except Exception as e:
-        # Built-in services may not exist in custom_services; keep local state.
-        print(f"Service pause persistence warning: {e}")
     return True
 
 def clone_service(srv_key, new_key, new_name=None, new_price=None):
@@ -412,15 +401,25 @@ def check_order_live_status(order_id, api_order_id):
         return f"📌 الحالة بالمزود: <b>{st}</b>\n📉 العدد المتبقي: `{rem}`\n📊 العدد الابتدائي: `{start_cnt}`"
     return "⚠️ متعذر جلب الحالة من المزود حالياً."
 
-def get_user(user_id):
+USER_CACHE = {}
+USER_CACHE_TTL = 8  # كاش قصير لتسريع الأزرار والقائمة
+
+def invalidate_user_cache(user_id):
+    USER_CACHE.pop(user_id, None)
+
+def get_user(user_id, force_refresh=False):
+    now = time.time()
+    cached = USER_CACHE.get(user_id)
+    if cached and not force_refresh and now - cached[1] < USER_CACHE_TTL:
+        return cached[0]
     try:
         res = supabase.table("users").select("*").eq("user_id", user_id).execute()
-        if res.data:
-            return res.data[0]
-        return None
+        user = res.data[0] if res.data else None
+        USER_CACHE[user_id] = (user, now)
+        return user
     except Exception as e:
         print(f"Error fetching user: {e}")
-        return None
+        return cached[0] if cached else None
         
 def find_user_by_id_or_username(query_str):
     clean_query = str(query_str).strip().replace('@', '').lower()
@@ -509,37 +508,9 @@ def set_ui_setting(key, value):
 
 def show_service_prices(): return get_ui_setting(UI_PRICE_SETTING_KEY, "0") == "1"
 
-def get_service_display_price(service):
-    """السعر الظاهر على زر الخدمة.
-    للخدمات ذات tiers/custom_tiers نعرض سعر أول باقة بدلاً من 0.
-    للخدمات العادية نستخدم price.
-    """
-    if not isinstance(service, dict):
-        return 0
-
-    for key in ("tiers", "custom_tiers"):
-        tiers = service.get(key)
-        if isinstance(tiers, list) and tiers:
-            prices = []
-            for tier in tiers:
-                try:
-                    price = float(tier.get("price"))
-                    if price >= 0:
-                        prices.append(price)
-                except (TypeError, ValueError, AttributeError):
-                    continue
-            if prices:
-                return min(prices)
-
-    try:
-        return float(service.get("price", 0) or 0)
-    except (TypeError, ValueError):
-        return 0
-
-
 def service_button_text(service, icon="📦"):
     name = str(service.get("btn_label", service.get("name", "خدمة")))
-    if show_service_prices(): return f"{icon} {name} | {get_service_display_price(service)} ن"
+    if show_service_prices(): return f"{icon} {name} | {service.get('price', 0)} ن"
     return f"{icon} {name}"
 
 def smart_maintenance_message(item_key, default="🛠️ هذه الخدمة قيد الصيانة حالياً، حاول لاحقاً."):
@@ -577,49 +548,16 @@ def process_smart_maintenance_message(message):
         msg=bot.send_message(message.chat.id, "❌ الرسالة فارغة، أرسلها من جديد:"); bot.register_next_step_handler(msg, process_smart_maintenance_message); return
     set_ui_setting(SMART_MAINT_KEY, text[:1000]); bot.send_message(message.chat.id, "✅ تم حفظ رسالة الصيانة الذكية.")
 
-SMART_MAINT_ITEMS_KEY = "smart_maintenance_items"
-
-def _load_maintenance_items():
-    """تحميل الخدمات الموجودة تحت الصيانة من Supabase."""
-    global maintenance_items
-    try:
-        r = supabase.table("settings").select("val_text").eq("key", SMART_MAINT_ITEMS_KEY).execute()
-        if r.data and r.data[0].get("val_text"):
-            raw = json.loads(str(r.data[0]["val_text"]))
-            if isinstance(raw, list):
-                maintenance_items = set(str(x) for x in raw)
-    except Exception as e:
-        print(f"Smart maintenance load error: {e}")
-    return maintenance_items
-
-def _save_maintenance_items():
-    """حفظ قائمة الخدمات تحت الصيانة بشكل دائم."""
-    try:
-        supabase.table("settings").upsert({
-            "key": SMART_MAINT_ITEMS_KEY,
-            "val_text": json.dumps(sorted(maintenance_items), ensure_ascii=False)
-        }, on_conflict="key").execute()
-        return True
-    except Exception as e:
-        print(f"Smart maintenance save error: {e}")
-        return False
-
 def is_item_in_maintenance(item_key):
-    return str(item_key) in maintenance_items
+    return item_key in maintenance_items
 
 def toggle_item_maintenance(item_key):
-    item_key = str(item_key)
     if item_key in maintenance_items:
         maintenance_items.remove(item_key)
-        enabled = False
+        return False
     else:
         maintenance_items.add(item_key)
-        enabled = True
-    _save_maintenance_items()
-    return enabled
-
-# تحميل حالة الصيانة عند تشغيل البوت
-_load_maintenance_items()
+        return True
 
 MENU_DESC_CACHE = {}
 MENU_DESC_CACHE_TTL = 60  # ثانية
@@ -670,18 +608,49 @@ def get_service_price(user_id, base_price):
 # دالة التخفيضات التلقائية للكميات الكبيرة
 # ==========================================
 def calculate_bulk_discount_price(base_rate_per_1000, quantity):
-    price_per_1k = base_rate_per_1000 + 0.5  
-    
+    """حساب سعر الكمية مع خصم الكميات:
+    5,000+ = 5% | 10,000+ = 7% | 20,000+ = 10%.
+    """
+    try:
+        base_rate_per_1000 = float(base_rate_per_1000)
+        quantity = int(quantity)
+    except (TypeError, ValueError):
+        return 0.0
+
+    if base_rate_per_1000 < 0 or quantity <= 0:
+        return 0.0
+
     discount_multiplier = 1.0
     if quantity >= 20000:
-        discount_multiplier = 0.90  
+        discount_multiplier = 0.90
     elif quantity >= 10000:
-        discount_multiplier = 0.93  
+        discount_multiplier = 0.93
     elif quantity >= 5000:
-        discount_multiplier = 0.95  
-        
-    total_price = (quantity / 1000.0) * price_per_1k * discount_multiplier
+        discount_multiplier = 0.95
+
+    total_price = (quantity / 1000.0) * base_rate_per_1000 * discount_multiplier
     return round(total_price, 2)
+
+
+def get_bulk_discount_percent(quantity):
+    try:
+        quantity = int(quantity)
+    except (TypeError, ValueError):
+        return 0
+    if quantity >= 20000:
+        return 10
+    if quantity >= 10000:
+        return 7
+    if quantity >= 5000:
+        return 5
+    return 0
+
+
+def calculate_quantity_final_price(user_id, base_rate_per_1000, quantity):
+    """يطبق خصم الكمية ثم خصم مستوى المستخدم."""
+    bulk_price = calculate_bulk_discount_price(base_rate_per_1000, quantity)
+    return get_service_price(user_id, bulk_price)
+
 
 # ==========================================
 # الواجهات الفرعية المدمجة للأزرار المختصرة
@@ -841,20 +810,6 @@ def load_custom_services_from_db():
 
 load_custom_services_from_db()
 
-# Restore individually edited prices for built-in services.
-try:
-    for _key, _srv in list(SERVICES.items()):
-        if _key.startswith("custom_srv_"):
-            continue
-        _r = supabase.table("settings").select("val_text").eq("key", f"price_{_key}").execute()
-        if _r.data and _r.data[0].get("val_text") not in (None, ""):
-            try:
-                _srv["price"] = float(_r.data[0]["val_text"])
-            except (TypeError, ValueError):
-                pass
-except Exception as _e:
-    print(f"Error restoring saved service prices: {_e}")
-
 CATEGORIES = {
     'cat_games': 'قسم الشحن والألعاب 🎮',
     'cat_insta': 'قسم الانستغرام 📸',
@@ -877,32 +832,6 @@ def load_sub_categories_from_db():
         print(f"Error loading sub-categories: {e}")
 
 load_sub_categories_from_db()
-
-# إزالة الأقسام الفرعية الافتراضية القديمة للإنستغرام نهائياً.
-# الخدمات نفسها لا تُحذف؛ سيتم عرضها مباشرة داخل قسم Instagram.
-try:
-    _old_insta_subs = SUB_CATEGORIES.get("cat_insta", [])
-    _blocked_insta_callbacks = {"fol", "like", "view", "share",
-                                "insta_fol_sub_menu", "open_like_menu",
-                                "open_view_menu", "open_share_menu"}
-    _new_insta_subs = [
-        sub for sub in _old_insta_subs
-        if str(sub.get("callback", "")) not in _blocked_insta_callbacks
-        and str(sub.get("name", "")) not in {
-            "👤 قسم المتابعين", "❤️ قسم اللايكات",
-            "👁️ قسم المشاهدات", "✈️ قسم المشاركات"
-        }
-    ]
-    if _old_insta_subs != _new_insta_subs:
-        SUB_CATEGORIES["cat_insta"] = _new_insta_subs
-        if not _new_insta_subs:
-            SUB_CATEGORIES.pop("cat_insta", None)
-        supabase.table("settings").upsert({
-            "key": "custom_sub_categories",
-            "val_text": json.dumps(SUB_CATEGORIES, ensure_ascii=False)
-        }, on_conflict="key").execute()
-except Exception as e:
-    print(f"Instagram built-in subcategories cleanup warning: {e}")
 
 try:
     res_del_cats = supabase.table("deleted_categories").select("cat_key").execute()
@@ -1001,6 +930,7 @@ def _custom_main_markup_buttons(markup):
 def _show_custom_link_menu(chat_id, message_id, item_id):
     item = _custom_link_item(item_id)
     if not item:
+        bot.answer_callback_query("", "❌ الزر غير موجود", show_alert=True) if False else None
         bot.send_message(chat_id, "❌ هذا الزر لم يعد موجوداً.")
         return
     links = item.get("links", [])
@@ -1594,21 +1524,17 @@ load_custom_categories_from_db()
 
 def load_manual_services_from_supabase_table():
     try:
-        deleted_rows = supabase.table("deleted_services").select("srv_key").execute()
-        deleted_keys = {str(r.get("srv_key")) for r in (deleted_rows.data or [])}
         res = supabase.table("custom_services").select("*").execute()
         if res.data:
             for row in res.data:
                 s_key = row.get("service_key")
                 s_data_str = row.get("service_data")
-                if not s_key or not s_data_str or str(s_key) in deleted_keys:
-                    continue
-                try:
-                    s_dict = json.loads(s_data_str)
-                    if isinstance(s_dict, dict):
+                if s_key and s_data_str:
+                    try:
+                        s_dict = json.loads(s_data_str)
                         SERVICES[s_key] = s_dict
-                except Exception as parse_err:
-                    print(f"Error parsing manual service {s_key}: {parse_err}")
+                    except Exception as parse_err:
+                        print(f"Error parsing manual service {s_key}: {parse_err}")
     except Exception as e:
         print(f"Error loading manual services from table: {e}")
 
@@ -1896,10 +1822,13 @@ def _layout_targets():
         for sub in subs or []:
             cb=str(sub.get("callback", ""))
             if not cb: continue
-            if not cb.startswith("sub_"):
+            # بعض الأقسام تستخدم callback مباشر، وبعضها sub_...
+            if cb not in ["insta_fol_sub_menu","open_like_menu","open_view_menu","open_share_menu"] and not cb.startswith("sub_"):
                 cb="sub_"+cb
             targets.append((cb,f"📂 {sub.get('name',cb)}"))
     for k,title in [
+        ("insta_fol_sub_menu","👤 خدمات المتابعين"),("open_like_menu","❤️ خدمات اللايكات"),
+        ("open_view_menu","👁️ خدمات المشاهدات"),("open_share_menu","✈️ خدمات المشاركات"),
         ("pubg_menu","🎮 خدمات ببجي"),("ff_menu","🔥 خدمات فري فاير"),
         ("ludo_menu","🎲 خدمات لودو"),("coc_menu","⚔️ خدمات كلاش"),
         ("cat_itunes","🍎 خدمات iTunes"),("cat_esim","📶 خدمات eSIM")]:
@@ -1924,19 +1853,21 @@ def _ensure_layout_target(menu_key):
     if key=="our_services":
         items=[(str(k),str(v)) for k,v in CATEGORIES.items()]
     elif key in CATEGORIES:
-        # الأقسام الرئيسية تعرض خدماتها مباشرة.
-        # الأقسام الفرعية الديناميكية الأخرى تبقى مدعومة فقط إذا أضافها الأدمن.
-        if key != "cat_insta":
-            for sub in SUB_CATEGORIES.get(key,[]) or []:
-                cb=str(sub.get("callback",""))
-                if cb and not cb.startswith("sub_"): cb="sub_"+cb
-                if cb: items.append((cb,str(sub.get("name",cb))))
+        for sub in SUB_CATEGORIES.get(key,[]) or []:
+            cb=str(sub.get("callback",""))
+            if cb and not cb.startswith("sub_") and key!="cat_insta": cb="sub_"+cb
+            if cb: items.append((cb,str(sub.get("name",cb))))
         for k,v in SERVICES.items():
-            if v.get("category")==key:
+            if v.get("category")==key and not v.get("subcat"):
                 items.append((str(k),str(v.get("btn_label",v.get("name","خدمة")))))
     elif key.startswith("sub_"):
         for k,v in SERVICES.items():
             if str(v.get("subcat",""))==key:
+                items.append((str(k),str(v.get("btn_label",v.get("name","خدمة")))))
+    elif key in ["insta_fol_sub_menu","open_like_menu","open_view_menu","open_share_menu"]:
+        wanted={"insta_fol_sub_menu":"fol","open_like_menu":"like","open_view_menu":"view","open_share_menu":"share"}[key]
+        for k,v in SERVICES.items():
+            if v.get("category")=="cat_insta" and (v.get("subcat")==wanted or wanted in v.get("name","")):
                 items.append((str(k),str(v.get("btn_label",v.get("name","خدمة")))))
     if not items: return None
     data[key]={"buttons":[{"callback":cb,"text":txt} for cb,txt in items],"order":[cb for cb,_ in items],"rows":[[cb] for cb,_ in items],"hidden":[],"columns":1}
@@ -2079,19 +2010,6 @@ def _show_layout_item(call, menu_key, row_index):
     )
 
 
-def _layout_cb_at(cfg, row_index, col_index):
-    """يرجع callback الحقيقي من موقع الصف/العمود. يمنع كسر callback إذا احتوى على |."""
-    try:
-        rows = cfg.get("rows", [])
-        row_index = int(row_index)
-        col_index = int(col_index)
-        if 0 <= row_index < len(rows) and 0 <= col_index < len(rows[row_index]):
-            return str(rows[row_index][col_index])
-    except Exception:
-        pass
-    return None
-
-
 def _show_layout_move_buttons(call, menu_key):
     """اختيار زر محدد ثم نقله إلى الصف السابق/التالي."""
     cfg = _normalize_layout_cfg(menu_key)
@@ -2099,11 +2017,10 @@ def _show_layout_move_buttons(call, menu_key):
 
     kb = types.InlineKeyboardMarkup(row_width=1)
     for row_index, row in enumerate(cfg.get("rows", [])):
-        for col_index, cb in enumerate(row):
+        for cb in row:
             kb.add(types.InlineKeyboardButton(
                 f"↕️ {labels.get(cb, cb)}",
-                # لا نضع callback نفسه هنا لأنه قد يحتوي على |.
-                callback_data=f"layout_move_pick|{menu_key}|{row_index}|{col_index}"
+                callback_data=f"layout_move_pick|{menu_key}|{cb}"
             ))
 
     kb.add(types.InlineKeyboardButton(
@@ -2136,13 +2053,13 @@ def _show_layout_move_controls(call, menu_key, cb):
     if row_index > 0:
         kb.add(types.InlineKeyboardButton(
             "⬆️ الصف السابق",
-            callback_data=f"layout_button_move|{menu_key}|{row_index}|{rows[row_index].index(cb)}|up"
+            callback_data=f"layout_button_move|{menu_key}|{cb}|up"
         ))
 
     if row_index < len(rows) - 1:
         kb.add(types.InlineKeyboardButton(
             "⬇️ الصف التالي",
-            callback_data=f"layout_button_move|{menu_key}|{row_index}|{rows[row_index].index(cb)}|down"
+            callback_data=f"layout_button_move|{menu_key}|{cb}|down"
         ))
 
     kb.add(types.InlineKeyboardButton(
@@ -2215,12 +2132,12 @@ def _show_layout_hide_buttons(call, menu_key):
     hidden = set(cfg.get("hidden", []))
 
     kb = types.InlineKeyboardMarkup(row_width=1)
-    for row_index, row in enumerate(cfg.get("rows", [])):
-        for col_index, cb in enumerate(row):
+    for row in cfg.get("rows", []):
+        for cb in row:
             state = "🚫 مخفي" if cb in hidden else "✅ ظاهر"
             kb.add(types.InlineKeyboardButton(
                 f"{state} | {labels.get(cb, cb)}",
-                callback_data=f"layout_hide_cb|{menu_key}|{row_index}|{col_index}"
+                callback_data=f"layout_hide_cb|{menu_key}|{cb}"
             ))
 
     kb.add(types.InlineKeyboardButton(
@@ -2239,11 +2156,48 @@ def _show_layout_hide_buttons(call, menu_key):
 
 
 def _handle_layout_callback(call):
+    """يعالج فقط callbacks الخاصة بمدير الواجهة/الأزرار المخصصة.
+    مهم: لا نمنع callbacks الخاصة بالخدمات (مثل custom_srv_...) أو القوائم العامة.
+    """
+    data = call.data or ""
+
+    # custom_menu|... هو زر مستخدم عادي، وليس لوحة إدارة.
+    if data.startswith("custom_menu|"):
+        try:
+            _show_custom_link_menu(call.message.chat.id, call.message.message_id, data.split("|", 1)[1])
+            bot.answer_callback_query(call.id)
+        except Exception as e:
+            print(f"Custom user menu callback error: {e}")
+            try:
+                bot.answer_callback_query(call.id, "❌ تعذر فتح القائمة.", show_alert=True)
+            except Exception:
+                pass
+        return True
+
+    # هذه callbacks وحدها تخص مدير الواجهة.
+    admin_exact = {
+        "ui_tools_menu", "ui_toggle_prices", "ui_ad_menu", "ui_ad_set",
+        "ui_ad_delete", "ui_smart_maint_menu", "ui_smart_maint_set",
+        "ui_smart_maint_reset", "custom_manage", "custom_add", "layout_admin"
+    }
+    admin_prefixes = (
+        "layout_menu|", "layout_pair_start|", "layout_pair_first|",
+        "layout_pair_do|", "layout_row|", "layout_move_menu|",
+        "layout_move_pick|", "layout_button_move|", "layout_rowmove|",
+        "layout_unpair|", "layout_hide_menu|", "layout_hide_cb|",
+        "layout_reset|", "layout_cols|", "layout_pick|", "layout_move|",
+        "layout_hide|", "custom_admin|", "custom_link_add|",
+        "custom_link_del|", "custom_rename|", "custom_toggle|", "custom_del|"
+    )
+
+    is_admin_callback = data in admin_exact or data.startswith(admin_prefixes)
+    if not is_admin_callback:
+        # ليس من اختصاص هذا المعالج؛ اترك query() يكمل معالجة الزر.
+        return False
+
     if call.from_user.id != ADMIN_ID:
         bot.answer_callback_query(call.id, "❌ غير مسموح", show_alert=True)
         return True
-
-    data = call.data
 
     try:
         if data == "ui_tools_menu":
@@ -2259,59 +2213,9 @@ def _handle_layout_callback(call):
         if data == "ui_ad_delete":
             set_ui_setting(UI_AD_KEY, ""); bot.answer_callback_query(call.id, "🗑️ تم حذف الإعلان"); _admin_ui_tools_menu(call.message.chat.id, call.message.message_id); return True
         if data == "ui_smart_maint_menu":
-            cur=get_ui_setting(SMART_MAINT_KEY, "").strip()
-            kb=types.InlineKeyboardMarkup(row_width=1)
-            kb.add(types.InlineKeyboardButton("🛠️ اختيار الخدمات للصيانة", callback_data="ui_smart_maint_services"))
-            kb.add(types.InlineKeyboardButton("✏️ تعديل رسالة الصيانة", callback_data="ui_smart_maint_set"))
-            if cur:
-                kb.add(types.InlineKeyboardButton("🗑️ الرسالة الافتراضية", callback_data="ui_smart_maint_reset"))
-            kb.add(types.InlineKeyboardButton("🔙 أدوات الواجهة", callback_data="ui_tools_menu"))
-            bot.edit_message_text(
-                f"🛠️ **الصيانة الذكية**\n\n{cur or '🛠️ هذه الخدمة قيد الصيانة حالياً، حاول لاحقاً.'}\n\nاختر (اختيار الخدمات للصيانة) لتحديد الخدمات التي تريد إيقافها.",
-                call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown"
-            )
-            return True
-
-        if data == "ui_smart_maint_services":
-            _load_maintenance_items()
-            kb=types.InlineKeyboardMarkup(row_width=1)
-            if not SERVICES:
-                kb.add(types.InlineKeyboardButton("🔙 الصيانة الذكية", callback_data="ui_smart_maint_menu"))
-            else:
-                for srv_key, srv in SERVICES.items():
-                    name=str(srv.get("btn_label", srv.get("name", srv_key)))
-                    status="🔴 تحت الصيانة" if is_item_in_maintenance(srv_key) else "🟢 تعمل"
-                    kb.add(types.InlineKeyboardButton(
-                        f"{status} | {name[:48]}",
-                        callback_data=f"smart_maint_service|{srv_key}"
-                    ))
-                kb.add(types.InlineKeyboardButton("🔙 الصيانة الذكية", callback_data="ui_smart_maint_menu"))
-            bot.edit_message_text(
-                "🛠️ **اختيار الخدمات للصيانة**\n\nاضغط على الخدمة لتبديل حالتها:\n🟢 تعمل → 🔴 تحت الصيانة → 🟢 تعمل",
-                call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown"
-            )
-            return True
-
-        if data.startswith("smart_maint_service|"):
-            srv_key=data.split("|", 1)[1]
-            if srv_key not in SERVICES:
-                bot.answer_callback_query(call.id, "❌ الخدمة غير موجودة.", show_alert=True)
-                return True
-            enabled=toggle_item_maintenance(srv_key)
-            bot.answer_callback_query(
-                call.id,
-                "🔴 تم وضع الخدمة تحت الصيانة" if enabled else "🟢 تم تفعيل الخدمة"
-            )
-            # إعادة رسم القائمة حتى تظهر الحالة الجديدة مباشرةً.
-            _load_maintenance_items()
-            kb=types.InlineKeyboardMarkup(row_width=1)
-            for key, srv in SERVICES.items():
-                name=str(srv.get("btn_label", srv.get("name", key)))
-                status="🔴 تحت الصيانة" if is_item_in_maintenance(key) else "🟢 تعمل"
-                kb.add(types.InlineKeyboardButton(f"{status} | {name[:48]}", callback_data=f"smart_maint_service|{key}"))
-            kb.add(types.InlineKeyboardButton("🔙 الصيانة الذكية", callback_data="ui_smart_maint_menu"))
-            bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=kb)
-            return True
+            cur=get_ui_setting(SMART_MAINT_KEY, "").strip(); kb=types.InlineKeyboardMarkup(row_width=1); kb.add(types.InlineKeyboardButton("✏️ تعديل رسالة الصيانة", callback_data="ui_smart_maint_set"))
+            if cur: kb.add(types.InlineKeyboardButton("🗑️ الرسالة الافتراضية", callback_data="ui_smart_maint_reset"))
+            kb.add(types.InlineKeyboardButton("🔙 أدوات الواجهة", callback_data="ui_tools_menu")); bot.edit_message_text(f"🛠️ **الصيانة الذكية**\n\n{cur or '🛠️ هذه الخدمة قيد الصيانة حالياً، حاول لاحقاً.'}", call.message.chat.id, call.message.message_id, reply_markup=kb); return True
         if data == "ui_smart_maint_set":
             msg=bot.send_message(call.message.chat.id, "🛠️ أرسل رسالة الصيانة. يمكنك استخدام {item} لاسم الخدمة أو القسم. أرسل 0 للإفتراضي.", reply_markup=cancel_operation_markup()); bot.register_next_step_handler(msg, process_smart_maintenance_message); return True
         if data == "ui_smart_maint_reset":
@@ -2397,12 +2301,11 @@ def _handle_layout_callback(call):
             cfg = _normalize_layout_cfg(key)
             labels = _layout_labels(cfg)
             kb = types.InlineKeyboardMarkup(row_width=1)
-            for row_index, row in enumerate(cfg.get("rows", [])):
-                for col_index, cb in enumerate(row):
-                    kb.add(types.InlineKeyboardButton(
-                        labels.get(cb, cb)[:40],
-                        callback_data=f"layout_pair_first|{key}|{row_index}|{col_index}"
-                    ))
+            for cb in cfg.get("order", []):
+                kb.add(types.InlineKeyboardButton(
+                    labels.get(cb, cb)[:40],
+                    callback_data=f"layout_pair_first|{key}|{cb}"
+                ))
             kb.add(types.InlineKeyboardButton("🔙 رجوع", callback_data=f"layout_menu|{key}"))
             bot.edit_message_text(
                 "🔗 **اختار الزر الأول**",
@@ -2412,32 +2315,16 @@ def _handle_layout_callback(call):
             return True
 
         if data.startswith("layout_pair_first|"):
-            parts = data.split("|")
-            if len(parts) == 4:
-                _, key, row_s, col_s = parts
-                first_row, first_col = row_s, col_s
-                cfg = _normalize_layout_cfg(key)
-                first = _layout_cb_at(cfg, row_s, col_s)
-            else:
-                _, key, first = data.split("|", 2)
-                cfg = _normalize_layout_cfg(key)
-                pos = next(((ri, ci) for ri, rr in enumerate(cfg.get("rows", [])) for ci, x in enumerate(rr) if x == first), None)
-                if pos:
-                    first_row, first_col = str(pos[0]), str(pos[1])
-                else:
-                    first_row, first_col = "-1", "-1"
-            if not first:
-                bot.answer_callback_query(call.id, "❌ الزر غير موجود", show_alert=True)
-                return True
+            _, key, first = data.split("|", 2)
+            cfg = _normalize_layout_cfg(key)
             labels = _layout_labels(cfg)
             kb = types.InlineKeyboardMarkup(row_width=1)
-            for row_index, row in enumerate(cfg.get("rows", [])):
-                for col_index, cb in enumerate(row):
-                    if cb != first:
-                        kb.add(types.InlineKeyboardButton(
-                            labels.get(cb, cb)[:40],
-                            callback_data=f"layout_pair_do|{key}|{first_row}|{first_col}|{row_index}|{col_index}"
-                        ))
+            for cb in cfg.get("order", []):
+                if cb != first:
+                    kb.add(types.InlineKeyboardButton(
+                        labels.get(cb, cb)[:40],
+                        callback_data=f"layout_pair_do|{key}|{first}|{cb}"
+                    ))
             kb.add(types.InlineKeyboardButton(
                 "🔙 اختيار الزر الأول",
                 callback_data=f"layout_pair_start|{key}"
@@ -2451,19 +2338,7 @@ def _handle_layout_callback(call):
             return True
 
         if data.startswith("layout_pair_do|"):
-            parts = data.split("|")
-            if len(parts) == 6:
-                _, key, first_r, first_c, second_r, second_c = parts
-                cfg_now = _normalize_layout_cfg(key)
-                first = _layout_cb_at(cfg_now, first_r, first_c)
-                second = _layout_cb_at(cfg_now, second_r, second_c)
-            else:
-                # توافق مع callback قديم.
-                _, key, first, second = data.split("|", 3)
-                cfg_now = _normalize_layout_cfg(key)
-            if not first or not second or first == second:
-                bot.answer_callback_query(call.id, "❌ أحد الأزرار غير موجود", show_alert=True)
-                return True
+            _, key, first, second = data.split("|", 3)
             all_data = dict(_load_button_layouts())
             cfg = dict(all_data.get(key, {}))
             rows = [list(r) for r in cfg.get("rows", [])]
@@ -2499,32 +2374,11 @@ def _handle_layout_callback(call):
             return True
 
         if data.startswith("layout_move_pick|"):
-            parts = data.split("|")
-            if len(parts) == 4:
-                _, key, row_s, col_s = parts
-                cfg = _normalize_layout_cfg(key)
-                cb = _layout_cb_at(cfg, row_s, col_s)
-                if not cb:
-                    bot.answer_callback_query(call.id, "❌ الزر غير موجود", show_alert=True)
-                    return True
-                _show_layout_move_controls(call, key, cb)
-                return True
-            # توافق مع أزرار قديمة كانت ترسل callback نفسه.
             _, key, cb = data.split("|", 2)
             _show_layout_move_controls(call, key, cb)
             return True
 
         if data.startswith("layout_button_move|"):
-            parts = data.split("|")
-            if len(parts) == 5:
-                _, key, row_s, col_s, direction = parts
-                cfg = _normalize_layout_cfg(key)
-                cb = _layout_cb_at(cfg, row_s, col_s)
-                if not cb:
-                    bot.answer_callback_query(call.id, "❌ الزر غير موجود", show_alert=True)
-                    return True
-                return _move_button_between_rows(call, key, cb, direction)
-            # توافق مع callback قديم.
             _, key, cb, direction = data.split("|", 3)
             return _move_button_between_rows(call, key, cb, direction)
 
@@ -2578,19 +2432,7 @@ def _handle_layout_callback(call):
             return True
 
         if data.startswith("layout_hide_cb|"):
-            parts = data.split("|")
-            if len(parts) == 4:
-                _, key, row_s, col_s = parts
-                cfg = _normalize_layout_cfg(key)
-                cb = _layout_cb_at(cfg, row_s, col_s)
-                if not cb:
-                    bot.answer_callback_query(call.id, "❌ الزر غير موجود", show_alert=True)
-                    return True
-            else:
-                # توافق مع callback قديم.
-                _, key, cb = data.split("|", 2)
-                cfg = _normalize_layout_cfg(key)
-
+            _, key, cb = data.split("|", 2)
             all_data = dict(_load_button_layouts())
             cfg = dict(all_data.get(key, {}))
             hidden = set(cfg.get("hidden", []))
@@ -2767,47 +2609,9 @@ def _advanced_service_callback_v2(call):
 
     if data == "recharge_manage":
         bot.answer_callback_query(call.id)
-        _show_recharge_codes_admin(chat_id)
-        return True
-
-    if data.startswith("recharge_code_info|"):
-        code = data.split("|", 1)[1]
-        try:
-            res = supabase.table("vouchers").select("*").eq("code", code).execute()
-            row = res.data[0] if res.data else None
-        except Exception:
-            row = None
-        if not row:
-            bot.answer_callback_query(call.id, "❌ الكود غير موجود.", show_alert=True)
-            return True
-        amount = row.get("amount", 0)
-        bot.answer_callback_query(call.id, f"🎟️ {code} — {amount} نقطة", show_alert=True)
         return True
 
     return False
-
-def _show_recharge_codes_admin(chat_id):
-    """واجهة إدارة أكواد الشحن المحفوظة."""
-    try:
-        res = supabase.table("vouchers").select("*").limit(50).execute()
-        rows = res.data or []
-    except Exception as e:
-        print(f"Recharge management load error: {e}")
-        rows = []
-    kb = types.InlineKeyboardMarkup(row_width=1)
-    if rows:
-        for row in rows[:50]:
-            code = str(row.get("code", ""))
-            amount = row.get("amount", 0)
-            kb.add(types.InlineKeyboardButton(
-                f"🎟️ {code} — {amount} نقطة",
-                callback_data=f"recharge_code_info|{code}"
-            ))
-    else:
-        kb.add(types.InlineKeyboardButton("ℹ️ لا توجد أكواد محفوظة", callback_data="recharge_manage"))
-    kb.add(types.InlineKeyboardButton("🔙 لوحة الإدارة", callback_data="admin_panel"))
-    bot.send_message(chat_id, "🎟️ **إدارة أكواد الشحن**\n\nاختر الكود لعرض تفاصيله:", reply_markup=kb, parse_mode="Markdown")
-
 
 @bot.callback_query_handler(func=lambda call: True)
 def query(call):
@@ -2849,33 +2653,9 @@ def query(call):
             ask_manual_service_values(chat_id)
             return
 
-        # فصل أزرار المستخدم العامة عن أزرار إدارة الأدمن.
-        # custom_menu|... يفتح قائمة الزر المخصص للمستخدم.
-        if data.startswith("custom_menu|"):
-            item_id = data.split("|", 1)[1]
-            _show_custom_link_menu(chat_id, message_id, item_id)
-            try:
-                bot.answer_callback_query(call.id)
-            except Exception:
-                pass
-            return
-
-        # أدوات الواجهة والترتيب وإدارة الأزرار: للأدمن فقط.
-        if (
-            data == "ui_tools_menu"
-            or data.startswith("ui_")
-            or data.startswith("layout_")
-            or data in ("custom_manage", "custom_add")
-            or data.startswith((
-                "custom_admin|",
-                "custom_link_add|",
-                "custom_link_del|",
-                "custom_rename|",
-                "custom_toggle|",
-                "custom_del|",
-                "smart_maint_service|"
-            ))
-        ):
+        # callbacks الخاصة بمدير الواجهة/الأزرار المخصصة تُعالج هنا.
+        # لا نمرر كل custom_* لأن custom_srv_* خدمات فعلية ويجب أن تصل لمعالج الطلب.
+        if (data.startswith("layout_") or data.startswith("custom_") or data.startswith("ui_")):
             if _handle_layout_callback(call):
                 return
 
@@ -3234,9 +3014,17 @@ def query(call):
             cat_key = data.replace('addsrv_cat_', '')
             temp_add_service[chat_id] = {'category': cat_key}
             subs = list(SUB_CATEGORIES.get(cat_key, []))
-            # Instagram لم يعد يحتوي أقساماً فرعية افتراضية.
             if cat_key == 'cat_insta':
-                subs = []
+                default_insta_subs = [
+                    {'name': '👤 قسم المتابعين', 'callback': 'fol'},
+                    {'name': '❤️ قسم اللايكات', 'callback': 'like'},
+                    {'name': '👁️ قسم المشاهدات', 'callback': 'view'},
+                    {'name': '✈️ قسم المشاركات', 'callback': 'share'}
+                ]
+                existing_callbacks = {s.get('callback') for s in subs}
+                for d_sub in default_insta_subs:
+                    if d_sub['callback'] not in existing_callbacks:
+                        subs.append(d_sub)
 
             if subs:
                 markup = types.InlineKeyboardMarkup(row_width=1)
@@ -3337,7 +3125,7 @@ def query(call):
         elif data == 'adm_edit_single_price':
             markup = types.InlineKeyboardMarkup(row_width=2)
             for key, val in SERVICES.items():
-                markup.add(types.InlineKeyboardButton(f"{val['name']} ({get_service_display_price(val)} ن)", callback_data=f"setprc_{key}", style=get_item_style(key)))
+                markup.add(types.InlineKeyboardButton(f"{val['name']} ({val.get('price', 0)} ن)", callback_data=f"setprc_{key}", style=get_item_style(key)))
             markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='adm_menu_finance', style=get_item_style('adm_menu_finance')))
             bot.edit_message_text("✏️ **اختر الخدمة المراد تعديل سعرها:**", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
             return
@@ -3940,7 +3728,7 @@ def query(call):
                     if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
                         btn_text = f"{v.get('btn_label', v['name'])}"
                         if 'price' in v:
-                            btn_text += f" ({get_service_display_price(v)} ن)"
+                            btn_text += f" ({v.get('price', 0)} ن)"
                         
                         markup.add(types.InlineKeyboardButton(btn_text, callback_data=k, style=get_item_style(k)))
                         found_services = True
@@ -3971,34 +3759,16 @@ def query(call):
             if is_item_in_maintenance('cat_insta') and chat_id != ADMIN_ID:
                 bot.send_message(chat_id, smart_maintenance_message(data, "🛠️ هذا القسم قيد الصيانة حالياً."))
                 return
-
             markup = types.InlineKeyboardMarkup(row_width=1)
-            found_items = False
-            for k, v in SERVICES.items():
-                if v.get('category') != 'cat_insta':
-                    continue
-                if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
-                    markup.add(
-                        types.InlineKeyboardButton(
-                            service_button_text(v, "📸"),
-                            callback_data=k,
-                            style=get_item_style(k)
-                        )
-                    )
-                    found_items = True
-
-            if not found_items:
-                markup.add(types.InlineKeyboardButton(
-                    "⚠️ لا توجد خدمات Instagram حالياً",
-                    callback_data='ignore',
-                    style=get_item_style('ignore')
-                ))
-
-            markup.add(types.InlineKeyboardButton(
-                "🔙 رجوع",
-                callback_data='our_services',
-                style=get_item_style('our_services')
-            ))
+            insta_subs = SUB_CATEGORIES.get('cat_insta', [
+                {'name': '👤 قسم المتابعين', 'callback': 'insta_fol_sub_menu'},
+                {'name': '❤️ قسم اللايكات', 'callback': 'open_like_menu'},
+                {'name': '👁️ قسم المشاهدات', 'callback': 'open_view_menu'},
+                {'name': '✈️ قسم المشاركات', 'callback': 'open_share_menu'}
+            ])
+            for sub in insta_subs:
+                markup.add(types.InlineKeyboardButton(sub['name'], callback_data=sub.get('callback', 'start'), style=get_item_style(sub.get('callback', 'start'))))
+            markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='our_services', style=get_item_style('our_services')))
             update_menu_safely(bot, chat_id, message_id, 'cat_insta', markup)
 
         elif data == 'cat_telegram':
@@ -4068,7 +3838,7 @@ def query(call):
                 if k in SERVICES:
                     s_data = SERVICES[k]
                     if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
-                        markup.add(types.InlineKeyboardButton(f"🍎 {s_data.get('btn_label', s_data['name'])} ({get_service_display_price(s_data)} ن)", callback_data=k, style=get_item_style(k)))
+                        markup.add(types.InlineKeyboardButton(f"🍎 {s_data.get('btn_label', s_data['name'])} ({s_data.get('price', 0)} ن)", callback_data=k, style=get_item_style(k)))
             markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='our_services', style=get_item_style('our_services')))
             update_menu_safely(bot, chat_id, message_id, 'cat_itunes', markup)
 
@@ -4081,7 +3851,7 @@ def query(call):
                 if k in SERVICES:
                     s_data = SERVICES[k]
                     if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
-                        markup.add(types.InlineKeyboardButton(f"📱 {s_data.get('btn_label', s_data['name'])} ({get_service_display_price(s_data)} ن)", callback_data=k, style=get_item_style(k)))
+                        markup.add(types.InlineKeyboardButton(f"📱 {s_data.get('btn_label', s_data['name'])} ({s_data.get('price', 0)} ن)", callback_data=k, style=get_item_style(k)))
             markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='our_services', style=get_item_style('our_services')))
             update_menu_safely(bot, chat_id, message_id, 'cat_esim', markup)
 
@@ -4205,6 +3975,57 @@ def query(call):
             msg = bot.send_message(chat_id, "🔄 **أرسل الآيدي (ID) الخاص بالشخص المراد التحويل له:**", parse_mode="Markdown")
             bot.register_next_step_handler(msg, process_transfer_target_id)
 
+        elif data == 'insta_fol_sub_menu':
+            if is_item_in_maintenance('insta_fol_sub_menu') and chat_id != ADMIN_ID:
+                bot.send_message(chat_id, "🛠️ هذا القسم فرعي قيد الصيانة حالياً.")
+                return
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            added_keys = set()
+            for k, v in SERVICES.items():
+                if v.get('category') == 'cat_insta' and (v.get('subcat') == 'fol' or 'متابع' in v.get('name', '')):
+                    if k in added_keys: continue
+                    added_keys.add(k)
+                    if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
+                        markup.add(types.InlineKeyboardButton(service_button_text(v, "👤"), callback_data=k, style=get_item_style(k)))
+            markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='cat_insta', style=get_item_style('cat_insta')))
+            update_menu_safely(bot, chat_id, message_id, 'insta_fol_sub_menu', markup)
+
+        elif data == 'open_like_menu':
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            added_keys = set()
+            for k, v in SERVICES.items():
+                if v.get('category') == 'cat_insta' and (v.get('subcat') == 'like' or 'لايك' in v.get('name', '')):
+                    if k in added_keys: continue
+                    added_keys.add(k)
+                    if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
+                        markup.add(types.InlineKeyboardButton(service_button_text(v, "❤️"), callback_data=k, style=get_item_style(k)))
+            markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='cat_insta', style=get_item_style('cat_insta')))
+            update_menu_safely(bot, chat_id, message_id, 'open_like_menu', markup)
+
+        elif data == 'open_view_menu':
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            added_keys = set()
+            for k, v in SERVICES.items():
+                if v.get('category') == 'cat_insta' and (v.get('subcat') == 'view' or 'مشاهد' in v.get('name', '')):
+                    if k in added_keys: continue
+                    added_keys.add(k)
+                    if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
+                        markup.add(types.InlineKeyboardButton(service_button_text(v, "👁️"), callback_data=k, style=get_item_style(k)))
+            markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='cat_insta', style=get_item_style('cat_insta')))
+            update_menu_safely(bot, chat_id, message_id, 'open_view_menu', markup)
+
+        elif data == 'open_share_menu':
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            added_keys = set()
+            for k, v in SERVICES.items():
+                if v.get('category') == 'cat_insta' and (v.get('subcat') == 'share' or 'مشارك' in v.get('name', '')):
+                    if k in added_keys: continue
+                    added_keys.add(k)
+                    if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
+                        markup.add(types.InlineKeyboardButton(service_button_text(v, "✈️"), callback_data=k, style=get_item_style(k)))
+            markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='cat_insta', style=get_item_style('cat_insta')))
+            update_menu_safely(bot, chat_id, message_id, 'open_share_menu', markup)
+
         elif data == 'pubg_menu':
             markup = types.InlineKeyboardMarkup(row_width=1)
             added_keys = set()
@@ -4213,7 +4034,7 @@ def query(call):
                     added_keys.add(k)
                     s_data = SERVICES[k]
                     if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
-                        markup.add(types.InlineKeyboardButton(f"{s_data.get('btn_label', s_data['name'])} ({get_service_display_price(s_data)} ن)", callback_data=k, style=get_item_style(k)))
+                        markup.add(types.InlineKeyboardButton(f"{s_data.get('btn_label', s_data['name'])} ({s_data.get('price', 0)} ن)", callback_data=k, style=get_item_style(k)))
             markup.add(types.InlineKeyboardButton("🔙 رجوع للألعاب", callback_data='cat_games', style=get_item_style('cat_games')))
             update_menu_safely(bot, chat_id, message_id, 'pubg_menu', markup)
 
@@ -4225,7 +4046,7 @@ def query(call):
                     added_keys.add(k)
                     s_data = SERVICES[k]
                     if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
-                        markup.add(types.InlineKeyboardButton(f"{s_data.get('btn_label', s_data['name'])} ({get_service_display_price(s_data)} ن)", callback_data=k, style=get_item_style(k)))
+                        markup.add(types.InlineKeyboardButton(f"{s_data.get('btn_label', s_data['name'])} ({s_data.get('price', 0)} ن)", callback_data=k, style=get_item_style(k)))
             markup.add(types.InlineKeyboardButton("🔙 رجوع للألعاب", callback_data='cat_games', style=get_item_style('cat_games')))
             update_menu_safely(bot, chat_id, message_id, 'ff_menu', markup)
 
@@ -4237,7 +4058,7 @@ def query(call):
                     added_keys.add(k)
                     s_data = SERVICES[k]
                     if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
-                        markup.add(types.InlineKeyboardButton(f"{s_data.get('btn_label', s_data['name'])} ({get_service_display_price(s_data)} ن)", callback_data=k, style=get_item_style(k)))
+                        markup.add(types.InlineKeyboardButton(f"{s_data.get('btn_label', s_data['name'])} ({s_data.get('price', 0)} ن)", callback_data=k, style=get_item_style(k)))
             markup.add(types.InlineKeyboardButton("🔙 رجوع للألعاب", callback_data='cat_games', style=get_item_style('cat_games')))
             update_menu_safely(bot, chat_id, message_id, 'ludo_menu', markup)
 
@@ -4249,7 +4070,7 @@ def query(call):
                     added_keys.add(k)
                     s_data = SERVICES[k]
                     if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
-                        markup.add(types.InlineKeyboardButton(f"{s_data.get('btn_label', s_data['name'])} ({get_service_display_price(s_data)} ن)", callback_data=k, style=get_item_style(k)))
+                        markup.add(types.InlineKeyboardButton(f"{s_data.get('btn_label', s_data['name'])} ({s_data.get('price', 0)} ن)", callback_data=k, style=get_item_style(k)))
             markup.add(types.InlineKeyboardButton("🔙 رجوع للألعاب", callback_data='cat_games', style=get_item_style('cat_games')))
             update_menu_safely(bot, chat_id, message_id, 'coc_menu', markup)
 
@@ -4373,9 +4194,15 @@ def query(call):
             if tiers_data and isinstance(tiers_data, list) and len(tiers_data) > 0:
                 markup = types.InlineKeyboardMarkup(row_width=2)
                 for t in tiers_data:
-                    t_qty = t.get('qty', 1000)
-                    t_price = get_service_price(chat_id, float(t.get('price', 1.0)))
-                    btn_label = f"{t_qty} ({t_price} نقطة)"
+                    t_qty = int(t.get('qty', 1000))
+                    tier_rate = (
+                        float(t.get('price', 1.0)) / t_qty * 1000.0
+                        if t_qty > 0 else float(t.get('price', 1.0))
+                    )
+                    t_price = calculate_quantity_final_price(chat_id, tier_rate, t_qty)
+                    t_discount = get_bulk_discount_percent(t_qty)
+                    discount_tag = f" 🔥-{t_discount}%" if t_discount else ""
+                    btn_label = f"{t_qty} ({t_price} نقطة){discount_tag}"
                     markup.add(types.InlineKeyboardButton(btn_label, callback_data=f"buytier_{srv_key}_{t_qty}", style=get_item_style(f"buytier_{srv_key}_{t_qty}")))
                 
                 markup.add(types.InlineKeyboardButton("✍️ اختيار العدد بنفسك (يدوي)", callback_data=f"custom_{srv_key}", style=get_item_style(f"custom_{srv_key}")))
@@ -4476,8 +4303,16 @@ def query(call):
                     selected_tier = next((t for t in tiers_list if int(t['qty']) == target_qty), None)
                     
                     if selected_tier:
-                        final_price = get_service_price(chat_id, float(selected_tier['price']))
+                        tier_qty_for_price = int(selected_tier.get('qty', target_qty))
+                        tier_rate_per_1000 = (
+                            float(selected_tier['price']) / tier_qty_for_price * 1000.0
+                            if tier_qty_for_price > 0 else float(selected_tier['price'])
+                        )
+                        final_price = calculate_quantity_final_price(
+                            chat_id, tier_rate_per_1000, tier_qty_for_price
+                        )
                         api_qty_to_send = int(selected_tier['api_qty'])
+                        bulk_discount_pct = get_bulk_discount_percent(tier_qty_for_price)
                         
                         srv_cat = s_data.get('category', '')
                         srv_name_lower = s_data.get('name', '').lower()
@@ -4498,7 +4333,8 @@ def query(call):
                         else:
                             prompt_text = "🔗 **أرسل الرابط أو المعرف المطلوب الآن:**"
 
-                        text_req = f"{prompt_text}\n*(الكمية المختارة: {target_qty} - السعر: {final_price} نقطة)*"
+                        discount_note = f" - خصم كمية {bulk_discount_pct}%" if bulk_discount_pct else ""
+                        text_req = f"{prompt_text}\n*(الكمية المختارة: {target_qty} - السعر: {final_price} نقطة{discount_note})*"
                         markup_back = types.InlineKeyboardMarkup()
                         markup_back.add(types.InlineKeyboardButton("🔙 رجوع", callback_data=srv_key, style=get_item_style(srv_key)))
                         
@@ -4569,10 +4405,6 @@ def query(call):
 
     except Exception as e:
         print(f"Callback Error: {e}")
-        try:
-            processing_order_users.discard(call.from_user.id)
-        except Exception:
-            pass
 
 # ==========================================
 # معالجات رسائل النصوص والخطوات (Steps)
@@ -5024,8 +4856,8 @@ def process_generic_custom_qty(message, base_service_key):
         else:
             price_per_1000 = service_data.get('price', 1.0)
 
-        cost_for_qty = (qty / 1000.0) * price_per_1000
-        final_price = get_service_price(chat_id, cost_for_qty)
+        bulk_discount_pct = get_bulk_discount_percent(qty)
+        final_price = calculate_quantity_final_price(chat_id, price_per_1000, qty)
 
         srv_cat = service_data.get('category', '')
         srv_name_lower = service_data.get('name', '').lower()
@@ -5045,7 +4877,13 @@ def process_generic_custom_qty(message, base_service_key):
         else:
             msg_prompt = "🔗 **أرسل الرابط أو المعرف المطلوب الآن:**"
 
-        msg = bot.send_message(chat_id, f"{msg_prompt}\n(السعر النهائي لـ {qty} وحدة: {final_price} نقطة)", reply_markup=markup_back, parse_mode="Markdown")
+        discount_note = f"\n🏷️ خصم كمية: {bulk_discount_pct}%" if bulk_discount_pct else ""
+        msg = bot.send_message(
+            chat_id,
+            f"{msg_prompt}\n(السعر النهائي لـ {qty} وحدة: {final_price} نقطة){discount_note}",
+            reply_markup=markup_back,
+            parse_mode="Markdown"
+        )
         bot.register_next_step_handler(msg, prepare_order_summary, final_price, service_data['service_id'], qty, f"{service_data['name']} ({qty})")
 
     except ValueError:
@@ -5088,7 +4926,7 @@ def cancel_admin_operation(chat_id):
         pending_orders_cache.pop(chat_id, None)
 
     try:
-        admin_panel_shortcut(chat_id)
+        _show_admin_panel(chat_id)
     except Exception:
         bot.send_message(
             chat_id,
@@ -5221,22 +5059,6 @@ def process_update_single_price(message, service_key):
 
         old_price = SERVICES[service_key].get('price', 0)
         SERVICES[service_key]['price'] = new_price
-
-        try:
-            if service_key.startswith("custom_srv_"):
-                supabase.table("custom_services").upsert({
-                    "service_key": service_key,
-                    "category": SERVICES[service_key].get("category"),
-                    "subcat": SERVICES[service_key].get("subcat"),
-                    "service_data": json.dumps(SERVICES[service_key], ensure_ascii=False)
-                }, on_conflict="service_key").execute()
-            else:
-                supabase.table("settings").upsert({
-                    "key": f"price_{service_key}",
-                    "val_text": str(new_price)
-                }, on_conflict="key").execute()
-        except Exception as db_err:
-            print(f"Price persistence warning for {service_key}: {db_err}")
 
         bot.send_message(
             message.chat.id,
