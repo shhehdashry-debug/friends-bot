@@ -458,24 +458,41 @@ def background_broken_services_monitor():
 threading.Thread(target=background_broken_services_monitor, daemon=True).start()
 
 def validate_service_link(service_category, link):
-    link_lower = link.lower()
-    
-    if service_category == 'cat_telegram':
-        if 't.me/' in link_lower or link_lower.startswith('@') or len(link.strip()) >= 3:
-            return True, "صالح"
-        return False, "❌ عذراً، يرجى إرسال معرف قناة أو كروب صحيح (يبدأ بـ @ أو رابط تليجرام)."
+    """التحقق من هدف الخدمة: رابط أو يوزر/معرف حسب نوع الخدمة."""
+    value = (link or "").strip()
+    link_lower = value.lower()
 
-    if not link.startswith('http') and service_category != 'cat_games':
-        return False, "⚠️ الرابط المدخل غير صحيح! يجب أن يبدأ الرابط بـ https://"
-        
+    # يوزر صالح مثل: moh_f24 أو @moh_f24
+    username_pattern = re.compile(r'^@?[A-Za-z0-9][A-Za-z0-9._-]{1,63}$')
+    is_username = bool(username_pattern.fullmatch(value))
+
+    if not value:
+        return False, "⚠️ لم يتم إدخال أي رابط أو يوزر."
+
+    if service_category == 'cat_telegram':
+        if 't.me/' in link_lower or value.startswith('@') or is_username:
+            return True, "صالح"
+        return False, "❌ أرسل رابط القناة/الكروب أو اليوزر مثل @username."
+
     if service_category == 'cat_insta':
-        if 'instagram.com' not in link_lower:
-            return False, "❌ عذراً، هذا القسم خاص بالانستغرام فقط! يرجى إرسال رابط صحيح."
-    elif service_category == 'cat_games':
-        if len(link.strip()) < 3:
+        # بعض خدمات المزود تطلب الرابط، وبعضها تطلب اليوزر.
+        if 'instagram.com' in link_lower:
+            return True, "صالح"
+        if is_username:
+            return True, "صالح"
+        return False, "⚠️ أرسل رابط Instagram أو اليوزر فقط، مثال: @username"
+
+    if service_category == 'cat_games':
+        if len(value) < 3:
             return False, "❌ الآيدي المدخل قصير جداً أو غير صالح!"
-            
-    return True, "صالح"
+        return True, "صالح"
+
+    # الخدمات الأخرى: اسمح بالرابط أو المعرف.
+    if value.startswith(('http://', 'https://')) or is_username:
+        return True, "صالح"
+
+    return False, "⚠️ أرسل الرابط كاملاً (https://) أو اليوزر/المعرف المطلوب للخدمة."
+
 
 def check_order_live_status(order_id, api_order_id):
     if str(api_order_id) == "0" or not str(api_order_id).isdigit():
@@ -4588,7 +4605,7 @@ def query(call):
                 elif 'مشاهد' in srv_name_lower or 'view' in srv_name_lower:
                     prompt_text = "👁️ **أرسل رابط الفيديو أو الريلز الخاص بالمشاهدات:**"
                 else:
-                    prompt_text = "📸 **أرسل رابط حسابك أو معرف الانستغرام (رابط البروفايل):**"
+                    prompt_text = "📸 **أرسل رابط الحساب أو يوزر الانستغرام:**"
             else:
                 prompt_text = srv_data_item.get('msg', '🔗 **أرسل الرابط أو المعرف المطلوب الآن:**')
 
@@ -4642,7 +4659,7 @@ def query(call):
                             elif 'مشاهد' in srv_name_lower or 'view' in srv_name_lower:
                                 prompt_text = "👁️ **أرسل رابط الفيديو أو الريلز الخاص بالمشاهدات:**"
                             else:
-                                prompt_text = "📸 **أرسل رابط حسابك أو معرف الانستغرام (رابط البروفايل):**"
+                                prompt_text = "📸 **أرسل رابط الحساب أو يوزر الانستغرام:**"
                         else:
                             prompt_text = "🔗 **أرسل الرابط أو المعرف المطلوب الآن:**"
 
@@ -5200,7 +5217,7 @@ def process_generic_custom_qty(message, base_service_key):
             elif 'مشاهد' in srv_name_lower or 'view' in srv_name_lower:
                 msg_prompt = "👁️ **أرسل رابط الفيديو أو الريلز الخاص بالمشاهدات:**"
             else:
-                msg_prompt = "📸 **أرسل رابط حسابك أو معرف الانستغرام (رابط البروفايل):**"
+                msg_prompt = "📸 **أرسل رابط الحساب أو يوزر الانستغرام:**"
         else:
             msg_prompt = "🔗 **أرسل الرابط أو المعرف المطلوب الآن:**"
 
