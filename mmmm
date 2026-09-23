@@ -63,6 +63,51 @@ temp_add_service = {}
 admin_states = {}          
 user_recharge_states = {} 
 usdt_recharge_states = {}
+processing_order_users = set()
+processing_order_lock = threading.Lock()
+
+# حدود حماية للذاكرة: تمنع بقاء بيانات المستخدمين القديمة داخل الذاكرة بلا نهاية.
+CACHE_MAX_USERS = 5000
+CACHE_CLEAN_INTERVAL = 60
+
+def _trim_dict_by_age(cache, ttl):
+    now = time.time()
+    stale = []
+    for key, value in list(cache.items()):
+        if isinstance(value, tuple) and len(value) >= 2 and isinstance(value[0], (int, float)):
+            if now - value[0] > ttl:
+                stale.append(key)
+    for key in stale:
+        cache.pop(key, None)
+    if len(cache) > CACHE_MAX_USERS:
+        try:
+            oldest = sorted(cache.items(), key=lambda kv: kv[1][0] if isinstance(kv[1], tuple) else 0)
+            for key, _ in oldest[:len(cache) - CACHE_MAX_USERS]:
+                cache.pop(key, None)
+        except Exception:
+            pass
+
+def _cleanup_runtime_caches():
+    while True:
+        try:
+            time.sleep(CACHE_CLEAN_INTERVAL)
+            _trim_dict_by_age(USER_CACHE, USER_CACHE_TTL * 12) if 'USER_CACHE' in globals() else None
+            _trim_dict_by_age(SUB_CACHE, SUB_CACHE_TTL * 2) if 'SUB_CACHE' in globals() else None
+            now = time.time()
+            for uid, clicks in list(user_click_tracker.items()):
+                fresh = [t for t in clicks if now - t < 3]
+                if fresh:
+                    user_click_tracker[uid] = fresh
+                else:
+                    user_click_tracker.pop(uid, None)
+            for cache in (pending_orders_cache, transfer_cache, temp_add_service, user_recharge_states, usdt_recharge_states):
+                if len(cache) > CACHE_MAX_USERS:
+                    for key in list(cache)[:len(cache) - CACHE_MAX_USERS]:
+                        cache.pop(key, None)
+        except Exception as e:
+            print(f"Cache cleanup error: {e}")
+
+threading.Thread(target=_cleanup_runtime_caches, daemon=True).start()
 
 PROFIT_MARGIN_USD = 0.5    
 try:
@@ -266,7 +311,37 @@ def get_api_balance():
         return {"error": str(e)}
 
 SERVICE_LIMITS_CACHE = {}
-SERVICE_LIMITS_CACHE_TTL = 60  # ثانية
+SERVICE_LIMITS_CACHE_TTL = 300  # 5 دقائق
+API_SERVICES_CACHE = {"data": None, "time": 0}
+API_SERVICES_CACHE_TTL = 300  # 5 دقائق
+
+def get_api_services_cached(force_refresh=False):
+    """يجلب قائمة الخدمات من المزود مرة واحدة ويشاركها كل الدوال بدل تكرار الطلب."""
+    now = time.time()
+    if (not force_refresh and API_SERVICES_CACHE["data"] is not None
+            and now - API_SERVICES_CACHE["time"] < API_SERVICES_CACHE_TTL):
+        return API_SERVICES_CACHE["data"]
+    try:
+        payload = {'key': API_KEY, 'action': 'services'}
+        response = http_session.post(API_URL, data=payload, timeout=15)
+        response.raise_for_status()
+        services = response.json()
+        if isinstance(services, list):
+            API_SERVICES_CACHE.update({"data": services, "time": now})
+            # تحديث حدود الخدمات دفعة واحدة.
+            for srv in services:
+                try:
+                    sid = str(srv.get('service'))
+                    SERVICE_LIMITS_CACHE[sid] = (
+                        now, int(srv.get('min', 1)), int(srv.get('max', 1000000))
+                    )
+                except (TypeError, ValueError):
+                    continue
+            return services
+        return None
+    except Exception as e:
+        print(f"Error fetching API services: {e}")
+        return API_SERVICES_CACHE["data"]
 
 def get_service_min_max(service_id):
     key = str(service_id)
@@ -274,19 +349,14 @@ def get_service_min_max(service_id):
     cached = SERVICE_LIMITS_CACHE.get(key)
     if cached and now - cached[0] < SERVICE_LIMITS_CACHE_TTL:
         return cached[1], cached[2]
-    try:
-        payload = {'key': API_KEY, 'action': 'services'}
-        response = http_session.post(API_URL, data=payload, timeout=15)
-        services = response.json()
-        if isinstance(services, list):
-            for srv in services:
-                if str(srv.get('service')) == key:
-                    min_q = int(srv.get('min', 1))
-                    max_q = int(srv.get('max', 1000000))
-                    SERVICE_LIMITS_CACHE[key] = (now, min_q, max_q)
-                    return min_q, max_q
-    except Exception as e:
-        print(f"Error fetching min/max: {e}")
+    services = get_api_services_cached()
+    if isinstance(services, list):
+        for srv in services:
+            if str(srv.get('service')) == key:
+                min_q = int(srv.get('min', 1))
+                max_q = int(srv.get('max', 1000000))
+                SERVICE_LIMITS_CACHE[key] = (now, min_q, max_q)
+                return min_q, max_q
     return (cached[1], cached[2]) if cached else (1, 1000000)
 
 def sync_prices_from_api_logic():
@@ -298,8 +368,8 @@ def sync_prices_from_api_logic():
             return False, "رد غير صالح من المزود"
             
         api_services = response.json()
-        
         if isinstance(api_services, list):
+            API_SERVICES_CACHE.update({"data": api_services, "time": time.time()})
             updated_count = 0
             for srv in api_services:
                 s_id = srv.get('service')
@@ -321,15 +391,16 @@ def sync_prices_from_api_logic():
                             
                             updated_count += 1
                             
-                            if k.startswith('custom_srv_'):
-                                try:
-                                    custom_only = {item_k: item_v for item_k, item_v in SERVICES.items() if item_k.startswith('custom_srv_')}
-                                    supabase.table("settings").upsert({
-                                        "key": "custom_services_list",
-                                        "val_text": json.dumps(custom_only, ensure_ascii=False)
-                                    }, on_conflict="key").execute()
-                                except Exception as db_e:
-                                    print(f"Error saving custom tiers to DB during sync: {db_e}")
+            # حفظ الخدمات المخصصة مرة واحدة فقط بعد انتهاء المزامنة، وليس داخل الحلقة.
+            custom_only = {item_k: item_v for item_k, item_v in SERVICES.items() if item_k.startswith('custom_srv_')}
+            if custom_only:
+                try:
+                    supabase.table("settings").upsert({
+                        "key": "custom_services_list",
+                        "val_text": json.dumps(custom_only, ensure_ascii=False)
+                    }, on_conflict="key").execute()
+                except Exception as db_e:
+                    print(f"Error saving custom services after sync: {db_e}")
 
             return True, updated_count
         elif isinstance(api_services, dict) and "error" in api_services:
@@ -340,15 +411,9 @@ def sync_prices_from_api_logic():
 
 def check_broken_services_logic():
     try:
-        payload = {'key': API_KEY, 'action': 'services'}
-        response = http_session.post(API_URL, data=payload, timeout=20)
-        
-        if 'application/json' not in response.headers.get('Content-Type', ''):
-            return False, "❌ تعذر الاتصال بالمزود لجلب القائمة."
-            
-        api_services = response.json()
+        api_services = get_api_services_cached(force_refresh=True)
         if not isinstance(api_services, list):
-            return False, "❌ رد غير صالح من المزود."
+            return False, "❌ تعذر الاتصال بالمزود لجلب القائمة."
             
         active_api_ids = {str(srv.get('service')) for srv in api_services}
         broken_services = []
@@ -522,17 +587,29 @@ UI_PRICE_SETTING_KEY = "ui_show_service_prices"
 SMART_MAINT_KEY = "smart_maintenance_message"
 UI_AD_KEY = "ui_global_advertisement"
 
-def get_ui_setting(key, default=""):
+UI_SETTINGS_CACHE = {}
+UI_SETTINGS_CACHE_TTL = 30  # ثانية
+
+def get_ui_setting(key, default="", force_refresh=False):
+    now = time.time()
+    cached = UI_SETTINGS_CACHE.get(key)
+    if not force_refresh and cached and now - cached[0] < UI_SETTINGS_CACHE_TTL:
+        return cached[1]
     try:
         r = supabase.table("settings").select("val_text").eq("key", key).execute()
         if r.data and r.data[0].get("val_text") is not None:
-            return str(r.data[0]["val_text"])
+            value = str(r.data[0]["val_text"])
+            UI_SETTINGS_CACHE[key] = (now, value)
+            return value
     except Exception as e: print(f"UI setting read error: {e}")
+    UI_SETTINGS_CACHE[key] = (now, default)
     return default
 
 def set_ui_setting(key, value):
     try:
-        supabase.table("settings").upsert({"key": key, "val_text": str(value)}, on_conflict="key").execute()
+        clean_value = str(value)
+        supabase.table("settings").upsert({"key": key, "val_text": clean_value}, on_conflict="key").execute()
+        UI_SETTINGS_CACHE[key] = (time.time(), clean_value)
         return True
     except Exception as e: print(f"UI setting save error: {e}")
     return False
@@ -691,10 +768,19 @@ def get_user_level(user_id, user_data=None):
     elif spent >= 50: return {"title": "🥉 تاجر مبتدئ", "discount": 0.01}
     else: return {"title": "👤 مستخدم عادي", "discount": 0.0}
 
-def get_service_price(user_id, base_price):
+def calculate_final_service_price(user_id, base_price, quantity=None, base_rate_per_1000=None):
+    """السعر النهائي الموحد: خصم الكمية أولاً ثم خصم رتبة المستخدم."""
+    try:
+        if quantity is not None and base_rate_per_1000 is not None:
+            base_price = calculate_bulk_discount_price(base_rate_per_1000, quantity)
+        base_price = float(base_price or 0)
+    except (TypeError, ValueError):
+        return 0.0
     level_info = get_user_level(user_id)
-    discount = level_info['discount']
-    return round(base_price * (1 - discount), 2)
+    return round(base_price * (1 - float(level_info.get('discount', 0))), 2)
+
+def get_service_price(user_id, base_price):
+    return calculate_final_service_price(user_id, base_price)
 
 # ==========================================
 # دالة التخفيضات التلقائية للكميات الكبيرة
@@ -1432,7 +1518,9 @@ def check_sub(user_id):
                 break
         except Exception as e:
             print(f"Subscription check error: {e}")
-            continue
+            # عند فشل فحص Telegram لا نعتبر المستخدم مشتركاً تلقائياً.
+            result = False
+            break
 
     SUB_CACHE[user_id] = (result, now)
     return result
@@ -1575,7 +1663,10 @@ def get_total_completed_orders_count(force_refresh=False):
     if not force_refresh and now - ORDERS_COUNT_CACHE["time"] < ORDERS_COUNT_CACHE_TTL:
         return ORDERS_COUNT_CACHE["value"]
     try:
-        res = supabase.table("user_orders").select("order_id", count="exact", head=True).execute()
+        res = (supabase.table("user_orders")
+               .select("order_id", count="exact", head=True)
+               .eq("status", "مكتمل ✅")
+               .execute())
         value = res.count if res.count is not None else 0
         ORDERS_COUNT_CACHE.update({"value": value, "time": now})
         return value
@@ -1755,11 +1846,15 @@ def show_user_account_info(chat_id, message_id):
     completed_orders_num = 0
     pending_orders_num = 0
     try:
-        res_all_ord = supabase.table("user_orders").select("status").eq("user_id", chat_id).execute()
-        user_ords = res_all_ord.data if res_all_ord.data else []
-        total_orders_num = len(user_ords)
-        completed_orders_num = sum(1 for o in user_ords if "مكتمل" in str(o.get('status', '')))
-        pending_orders_num = sum(1 for o in user_ords if "قيد" in str(o.get('status', '')))
+        base_q = supabase.table("user_orders").select("order_id", count="exact", head=True).eq("user_id", chat_id)
+        res_total = base_q.execute()
+        total_orders_num = res_total.count or 0
+        res_completed = (supabase.table("user_orders").select("order_id", count="exact", head=True)
+                         .eq("user_id", chat_id).eq("status", "مكتمل ✅").execute())
+        completed_orders_num = res_completed.count or 0
+        res_pending = (supabase.table("user_orders").select("order_id", count="exact", head=True)
+                       .eq("user_id", chat_id).eq("status", "قيد التنفيذ").execute())
+        pending_orders_num = res_pending.count or 0
     except Exception:
         pass
 
@@ -4165,8 +4260,14 @@ def query(call):
             main_menu(chat_id)
 
         elif data == 'checkout_entire_cart':
+            with processing_order_lock:
+                if chat_id in processing_order_users:
+                    bot.answer_callback_query(call.id, "⏳ توجد عملية شراء قيد التنفيذ.", show_alert=True)
+                    return
+                processing_order_users.add(chat_id)
             cart = user_carts.get(chat_id, [])
             if not cart:
+                processing_order_users.discard(chat_id)
                 bot.send_message(chat_id, "❌ السلة فارغة.")
                 return
 
@@ -4174,6 +4275,7 @@ def query(call):
             user_points = get_points(chat_id, get_user(chat_id, force_refresh=True))
 
             if user_points < total_cost:
+                processing_order_users.discard(chat_id)
                 bot.send_message(chat_id, f"⚠️ **الرصيد غير كافٍ**\n\n💰 رصيدك الحالي: `{user_points}` نقطة\n💳 المطلوب: `{total_cost}` نقطة\n\nيرجى شحن الرصيد ثم المحاولة مرة أخرى.", parse_mode="Markdown")
                 return
 
@@ -4198,6 +4300,7 @@ def query(call):
                 success_count += 1
 
             user_carts[chat_id] = []
+            processing_order_users.discard(chat_id)
             bot.send_message(chat_id, f"🎉 **تم تنفيذ جميع طلبات السلة بنجاح! ({success_count} طلبات)**", parse_mode="Markdown")
 
         elif data == 'top_services':
@@ -4552,10 +4655,11 @@ def query(call):
                 print(f"Error in buytier handler: {e}")
 
         elif data == 'confirm_order_now':
-            if chat_id in processing_order_users:
-                bot.answer_callback_query(call.id, "⏳ الطلب قيد المعالجة، انتظر قليلاً.", show_alert=True)
-                return
-            processing_order_users.add(chat_id)
+            with processing_order_lock:
+                if chat_id in processing_order_users:
+                    bot.answer_callback_query(call.id, "⏳ الطلب قيد المعالجة، انتظر قليلاً.", show_alert=True)
+                    return
+                processing_order_users.add(chat_id)
             order_data = pending_orders_cache.get(chat_id)
             if not order_data:
                 processing_order_users.discard(chat_id)
@@ -4563,7 +4667,8 @@ def query(call):
                 return
 
             final_price = order_data['price']
-            user_points = get_points(chat_id)
+            fresh_user = get_user(chat_id, force_refresh=True)
+            user_points = get_points(chat_id, fresh_user)
 
             if user_points < final_price:
                 processing_order_users.discard(chat_id)
@@ -5062,8 +5167,9 @@ def process_generic_custom_qty(message, base_service_key):
             price_per_1000 = service_data.get('price', 1.0)
 
         # خصم الكميات: 5% من 5000، 7% من 10000، 10% من 20000.
-        cost_for_qty = calculate_bulk_discount_price(price_per_1000, qty)
-        final_price = get_service_price(chat_id, cost_for_qty)
+        final_price = calculate_final_service_price(
+            chat_id, 0, quantity=qty, base_rate_per_1000=price_per_1000
+        )
         bulk_note = ""
         if qty >= 20000:
             bulk_note = "\n🎯 خصم كمية: 10%"
