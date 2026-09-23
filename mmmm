@@ -1644,6 +1644,8 @@ def auto_check_orders_and_notifications():
                         if status_ar != "قيد التنفيذ":
                             supabase.table("user_orders").update({"status": status_ar}).eq("order_id", order['order_id']).execute()
                             if status_ar == "مكتمل ✅":
+                                # إبطال الكاش فوراً حتى يظهر عداد الطلبات المنجزة الجديد مباشرة.
+                                ORDERS_COUNT_CACHE["time"] = 0
                                 try:
                                     bot.send_message(order['user_id'], f"🎉 **تم إكمال طلبك بنجاح!**\n\n🆔 رقم الطلب: `{order['order_id']}`\n📦 الخدمة: {order['service']}\n💰 السعر: `{order.get('price', 0)}` نقطة", parse_mode="Markdown")
                                 except Exception as e:
@@ -1659,18 +1661,27 @@ ORDERS_COUNT_CACHE = {"value": 0, "time": 0}
 ORDERS_COUNT_CACHE_TTL = 60  # ثانية
 
 def get_total_completed_orders_count(force_refresh=False):
+    """إرجاع العدد الحقيقي للطلبات المنجزة مع دعم صيغ الحالة القديمة والجديدة."""
     now = time.time()
     if not force_refresh and now - ORDERS_COUNT_CACHE["time"] < ORDERS_COUNT_CACHE_TTL:
         return ORDERS_COUNT_CACHE["value"]
     try:
+        completed_statuses = [
+            "مكتمل ✅",
+            "مكتمل",
+            "مكتملة",
+            "Completed",
+            "completed"
+        ]
         res = (supabase.table("user_orders")
                .select("order_id", count="exact", head=True)
-               .eq("status", "مكتمل ✅")
+               .in_("status", completed_statuses)
                .execute())
         value = res.count if res.count is not None else 0
         ORDERS_COUNT_CACHE.update({"value": value, "time": now})
         return value
-    except Exception:
+    except Exception as e:
+        print(f"Completed orders count error: {e}")
         return ORDERS_COUNT_CACHE["value"]
 
 def recharge_points_menu(chat_id, message_id):
@@ -3224,7 +3235,7 @@ def query(call):
                 return
 
         elif data == 'completed_orders_info':
-            total_cnt = get_total_completed_orders_count()
+            total_cnt = get_total_completed_orders_count(force_refresh=True)
             bot.answer_callback_query(
                 call.id, 
                 f"🛡️ نفخر بخدمتكم! لقد تم إنجاز أكثر من {total_cnt} طلب عبر بوت المهاجم بنجاح تام ✅", 
