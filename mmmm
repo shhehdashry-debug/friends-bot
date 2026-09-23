@@ -1661,27 +1661,24 @@ ORDERS_COUNT_CACHE = {"value": 0, "time": 0}
 ORDERS_COUNT_CACHE_TTL = 60  # ثانية
 
 def get_total_completed_orders_count(force_refresh=False):
-    """إرجاع العدد الحقيقي للطلبات المنجزة مع دعم صيغ الحالة القديمة والجديدة."""
+    """إرجاع العدد الحقيقي لكل الطلبات المسجلة عبر البوت.
+    العداد يمثل إجمالي الطلبات، وليس فقط حالة مكتمل، لأن الطلبات
+    القديمة قد تكون محفوظة بحالات مختلفة.
+    """
     now = time.time()
     if not force_refresh and now - ORDERS_COUNT_CACHE["time"] < ORDERS_COUNT_CACHE_TTL:
         return ORDERS_COUNT_CACHE["value"]
     try:
-        completed_statuses = [
-            "مكتمل ✅",
-            "مكتمل",
-            "مكتملة",
-            "Completed",
-            "completed"
-        ]
-        res = (supabase.table("user_orders")
-               .select("order_id", count="exact", head=True)
-               .in_("status", completed_statuses)
-               .execute())
+        res = (
+            supabase.table("user_orders")
+            .select("order_id", count="exact", head=True)
+            .execute()
+        )
         value = res.count if res.count is not None else 0
         ORDERS_COUNT_CACHE.update({"value": value, "time": now})
         return value
     except Exception as e:
-        print(f"Completed orders count error: {e}")
+        print(f"Orders count error: {e}")
         return ORDERS_COUNT_CACHE["value"]
 
 def recharge_points_menu(chat_id, message_id):
