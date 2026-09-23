@@ -1359,7 +1359,7 @@ def admin_panel_shortcut(chat_id, message_id=None):
         types.InlineKeyboardButton("🎛️ ترتيب أزرار البوت", callback_data='layout_admin', style=get_item_style('layout_admin')),
         types.InlineKeyboardButton("🔗 إضافة/إدارة زر جديد", callback_data='custom_manage', style=get_item_style('custom_manage')),
         types.InlineKeyboardButton("🎛️ أدوات الواجهة: إعلان + سعر + صيانة", callback_data='ui_tools_menu', style=get_item_style('ui_tools_menu')),
-        types.InlineKeyboardButton("🔌 فحص اتصال المواقع", callback_data='check_api_connections', style=get_item_style('check_api_connections')),
+        types.InlineKeyboardButton("🔌 فحص اتصال المواقع", callback_data='check_api_connections'),
         types.InlineKeyboardButton("🛠️ صيانة الأزرار والأقسام الشاملة", callback_data='adm_maint_control_menu', style=get_item_style('adm_maint_control_menu')),
         types.InlineKeyboardButton("🎨 تعديل ألوان الأقسام والخدمات", callback_data='adm_select_item_to_recolor', style=get_item_style('adm_select_item_to_recolor')),
         types.InlineKeyboardButton("📱 لوحة تحكم آسيا (أدمن)", callback_data='admin_asiacell_panel', style=get_item_style('admin_asiacell_panel')),
@@ -2995,7 +2995,7 @@ def admin_check_api_connections(call):
         else:
             msg += "🔴 **لا يوجد اتصال صحيح بالموقعين.**"
 
-        kb = types.InlineKeyboardMarkup(row_width=1)
+        kb = types.InlineKeyboardMarkup()
         kb.add(types.InlineKeyboardButton("🔄 إعادة الفحص", callback_data="check_api_connections"))
         kb.add(types.InlineKeyboardButton("🔙 لوحة الإدارة", callback_data="admin_panel"))
 
