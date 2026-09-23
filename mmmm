@@ -3488,10 +3488,21 @@ def query(call):
                 markup = types.InlineKeyboardMarkup()
 
                 for cat_k, cat_v in CATEGORIES.items():
+
+                    # نتأكد أن callback_data ضمن حدود Telegram
+                    callback_data = f"adm_del_cat_srvs_{cat_k}"
+
+                    if len(callback_data.encode("utf-8")) > 64:
+                        print(
+                            f"⚠️ callback_data طويل للقسم: "
+                            f"{cat_k} | {len(callback_data.encode('utf-8'))} bytes"
+                        )
+                        continue
+
                     markup.add(
                         types.InlineKeyboardButton(
-                            cat_v,
-                            callback_data=f"adm_del_cat_srvs_{cat_k}"
+                            str(cat_v),
+                            callback_data=callback_data
                         )
                     )
 
@@ -3510,7 +3521,7 @@ def query(call):
                 )
 
             except Exception as e:
-                print(f"Delete services menu error: {e}")
+                print(f"❌ Delete services menu error: {e}")
 
                 try:
                     bot.answer_callback_query(
