@@ -3482,12 +3482,45 @@ def query(call):
             return
 
         elif data == 'adm_delete_srv_list':
-            bot.answer_callback_query(call.id, "وصل للزر ✅")
-            markup = types.InlineKeyboardMarkup(row_width=1)
-            for cat_k, cat_v in CATEGORIES.items():
-                markup.add(types.InlineKeyboardButton(cat_v, callback_data=f"adm_del_cat_srvs_{cat_k}", style=get_item_style(cat_k)))
-            markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
-            bot.edit_message_text("📌 **اختر القسم لعرض خدماته وحذفها فوراً، أو لحذف القسم كله:**", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+            try:
+                bot.answer_callback_query(call.id, "🔄 جاري فتح الأقسام...")
+
+                markup = types.InlineKeyboardMarkup()
+
+                for cat_k, cat_v in CATEGORIES.items():
+                    markup.add(
+                        types.InlineKeyboardButton(
+                            cat_v,
+                            callback_data=f"adm_del_cat_srvs_{cat_k}"
+                        )
+                    )
+
+                markup.add(
+                    types.InlineKeyboardButton(
+                        "🔙 رجوع",
+                        callback_data="adm_manage_services"
+                    )
+                )
+
+                bot.edit_message_text(
+                    "📌 اختر القسم لعرض خدماته وحذفها فوراً، أو لحذف القسم كله:",
+                    chat_id,
+                    message_id,
+                    reply_markup=markup
+                )
+
+            except Exception as e:
+                print(f"Delete services menu error: {e}")
+
+                try:
+                    bot.answer_callback_query(
+                        call.id,
+                        "❌ حدث خطأ أثناء فتح قائمة الحذف",
+                        show_alert=True
+                    )
+                except Exception:
+                    pass
+
             return
 
         elif data.startswith('adm_del_cat_srvs_'):
