@@ -3482,6 +3482,7 @@ def query(call):
             return
 
         elif data == 'adm_delete_srv_list':
+            bot.answer_callback_query(call.id, "وصل للزر ✅")
             markup = types.InlineKeyboardMarkup(row_width=1)
             for cat_k, cat_v in CATEGORIES.items():
                 markup.add(types.InlineKeyboardButton(cat_v, callback_data=f"adm_del_cat_srvs_{cat_k}", style=get_item_style(cat_k)))
