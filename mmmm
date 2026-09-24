@@ -1155,6 +1155,59 @@ def _custom_main_markup_buttons(markup):
     return markup
 
 
+def _show_dynamic_subcategory_menu(chat_id, message_id, parent_key, parent_callback=None):
+    """يعرض الأقسام الفرعية لأي زر في البوت، وليس CATEGORIES فقط."""
+    subs = SUB_CATEGORIES.get(parent_key, []) or []
+    markup = types.InlineKeyboardMarkup(row_width=1)
+
+    for sub in subs:
+        sub_cb = str(sub.get("callback", "")).strip()
+        sub_name = str(sub.get("name", "قسم فرعي")).strip()
+
+        if not sub_cb:
+            continue
+
+        if not sub_cb.startswith("sub_"):
+            sub_cb = f"sub_{sub_cb}"
+
+        markup.add(
+            types.InlineKeyboardButton(
+                f"📁 {sub_name[:45]}",
+                callback_data=sub_cb,
+                style=get_item_style(sub_cb)
+            )
+        )
+
+    if parent_callback and parent_callback.startswith("custom_menu|"):
+        back_cb = "start"
+    else:
+        back_cb = "our_services"
+
+    markup.add(
+        types.InlineKeyboardButton(
+            "🔙 رجوع",
+            callback_data=back_cb,
+            style=get_item_style(back_cb)
+        )
+    )
+
+    try:
+        bot.edit_message_text(
+            "📂 **اختر القسم الفرعي:**",
+            chat_id,
+            message_id,
+            reply_markup=markup,
+            parse_mode="Markdown"
+        )
+    except Exception:
+        bot.send_message(
+            chat_id,
+            "📂 **اختر القسم الفرعي:**",
+            reply_markup=markup,
+            parse_mode="Markdown"
+        )
+
+
 def _show_custom_link_menu(chat_id, message_id, item_id):
     item = _custom_link_item(item_id)
     if not item:
@@ -1162,6 +1215,22 @@ def _show_custom_link_menu(chat_id, message_id, item_id):
         return
     links = item.get("links", [])
     markup = types.InlineKeyboardMarkup(row_width=1)
+
+    # الأقسام الفرعية داخل الزر المخصص
+    custom_parent_key = f"custom:{item_id}"
+    for sub in SUB_CATEGORIES.get(custom_parent_key, []) or []:
+        sub_cb = str(sub.get("callback", "")).strip()
+        sub_name = str(sub.get("name", "قسم فرعي")).strip()
+        if sub_cb:
+            if not sub_cb.startswith("sub_"):
+                sub_cb = f"sub_{sub_cb}"
+            markup.add(
+                types.InlineKeyboardButton(
+                    f"📁 {sub_name[:45]}",
+                    callback_data=sub_cb,
+                    style=get_item_style(sub_cb)
+                )
+            )
     for link in links:
         url = str(link.get("url", "")).strip()
         name = str(link.get("name", "رابط")).strip()
@@ -3285,6 +3354,26 @@ def query(call):
             ask_manual_service_values(chat_id)
             return
 
+        # إذا كان لأي زر قسم فرعي محفوظ، افتح أقسامه أولاً.
+        # هذا يجعل نظام الأقسام الفرعية غير مرتبط بـ CATEGORIES فقط.
+        dynamic_parent_key = data
+
+        if data.startswith("custom_menu|"):
+            dynamic_parent_key = "custom:" + data.split("|", 1)[1]
+
+        if SUB_CATEGORIES.get(dynamic_parent_key):
+            _show_dynamic_subcategory_menu(
+                chat_id,
+                message_id,
+                dynamic_parent_key,
+                data
+            )
+            try:
+                bot.answer_callback_query(call.id)
+            except Exception:
+                pass
+            return
+
         # فصل أزرار المستخدم العامة عن أزرار إدارة الأدمن.
         # custom_menu|... يفتح قائمة الزر المخصص للمستخدم.
         if data.startswith("custom_menu|"):
@@ -3510,20 +3599,271 @@ def query(call):
 
             elif data == 'adm_add_sub_category':
                 markup = types.InlineKeyboardMarkup(row_width=1)
-                all_cats = dict(CATEGORIES)
-                for cat_k, cat_v in all_cats.items():
-                    markup.add(types.InlineKeyboardButton(cat_v, callback_data=f"addsub_cat_{cat_k}", style=get_item_style(cat_k)))
-                markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
-                bot.edit_message_text("📂 **اختر القسم الرئيسي الذي تريد إضافة قسم فرعي له:**", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+
+                # اجمع كل الأزرار القابلة للظهور في البوت:
+                # الرئيسية + الواجهات + الأقسام + الأقسام الفرعية + الأزرار المخصصة.
+                # لا نعتمد على CATEGORIES وحدها.
+                parent_buttons = []
+                seen_parents = set()
+
+                def add_parent_button(parent_key, title, cb=None):
+                    parent_key = str(parent_key)
+                    cb = str(cb or parent_key)
+                    if cb in seen_parents:
+                        return
+                    seen_parents.add(cb)
+                    parent_buttons.append((cb, str(title or cb)))
+
+                # الواجهة الرئيسية وجميع الواجهات المسجلة في مدير ترتيب الأزرار
+                try:
+                    layout_data = _load_button_layouts()
+                except Exception:
+                    layout_data = {}
+
+                layout_keys = ["main"]
+                try:
+                    layout_keys += [str(k) for k, _ in _layout_targets()]
+                except Exception:
+                    pass
+
+                for layout_key in layout_keys:
+                    cfg = layout_data.get(layout_key)
+                    if not cfg:
+                        try:
+                            cfg = _ensure_layout_target(layout_key)
+                        except Exception:
+                            cfg = None
+
+                    if not cfg:
+                        continue
+
+                    labels = _layout_labels(cfg)
+                    rows = cfg.get("rows") or [[x] for x in cfg.get("order", [])]
+
+                    for row in rows:
+                        for button_cb in row:
+                            button_cb = str(button_cb)
+                            if not button_cb:
+                                continue
+                            title = labels.get(button_cb, button_cb)
+
+                            # زر مخصص له مفتاح مختلف عند التخزين.
+                            if button_cb.startswith("custom_menu|"):
+                                custom_id = button_cb.split("|", 1)[1]
+                                add_parent_button(
+                                    f"custom:{custom_id}",
+                                    title,
+                                    button_cb
+                                )
+                            else:
+                                add_parent_button(
+                                    button_cb,
+                                    title,
+                                    button_cb
+                                )
+
+                # الأزرار المخصصة التي لم تدخل بعد في layout
+                try:
+                    for item in _load_custom_link_buttons():
+                        item_id = str(item.get("id", "")).strip()
+                        item_name = str(item.get("name", "زر مخصص")).strip()
+                        if item_id and not item.get("hidden", False):
+                            add_parent_button(
+                                f"custom:{item_id}",
+                                item_name,
+                                f"custom_menu|{item_id}"
+                            )
+                except Exception:
+                    pass
+
+                if not parent_buttons:
+                    markup.add(
+                        types.InlineKeyboardButton(
+                            "⚠️ لا توجد أزرار قابلة للاختيار حالياً",
+                            callback_data="ignore"
+                        )
+                    )
+                else:
+                    for parent_key, title in parent_buttons:
+                        # callback_data هنا قصير؛ المفتاح الحقيقي محفوظ داخلياً.
+                        safe_key = parent_key[:45]
+                        markup.add(
+                            types.InlineKeyboardButton(
+                                f"📁 {title[:45]}",
+                                callback_data=f"addsub_parent|{safe_key}"
+                            )
+                        )
+
+                markup.add(
+                    types.InlineKeyboardButton(
+                        "🔙 رجوع",
+                        callback_data='adm_manage_services',
+                        style=get_item_style('adm_manage_services')
+                    )
+                )
+
+                bot.edit_message_text(
+                    "📂 **اختر أي زر من أزرار البوت تريد إضافة قسم فرعي داخله:**",
+                    chat_id,
+                    message_id,
+                    reply_markup=markup,
+                    parse_mode="Markdown"
+                )
                 return
 
-            elif data.startswith('addsub_cat_'):
-                cat_key = data.replace('addsub_cat_', '')
-                temp_add_service[chat_id] = {'category': cat_key}
-                text_req = "📝 **أدخل اسم القسم الفرعي الجديد (مثال: `متابعين عرب`):**"
-                markup_back = types.InlineKeyboardMarkup()
-                markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
-                bot.edit_message_text(text_req, chat_id, message_id, reply_markup=markup_back, parse_mode="Markdown")
+            elif data.startswith('addsub_parent|'):
+                parent_key = data.split("|", 1)[1].strip()
+
+                if not parent_key:
+                    bot.answer_callback_query(
+                        call.id,
+                        "❌ الزر غير صالح",
+                        show_alert=True
+                    )
+                    return
+
+                # إذا كان المفتاح custom:ID فهذا زر مخصص.
+                if parent_key.startswith("custom:"):
+                    custom_id = parent_key.split(":", 1)[1]
+                    item = _custom_link_item(custom_id)
+                    parent_name = item.get("name", "الزر المخصص") if item else "الزر المخصص"
+                else:
+                    parent_name = parent_key
+
+                    # حاول أخذ الاسم الحقيقي من كل الواجهات.
+                    try:
+                        for layout_key in ["main"] + [str(k) for k, _ in _layout_targets()]:
+                            cfg = _load_button_layouts().get(layout_key) or _ensure_layout_target(layout_key)
+                            if cfg:
+                                labels = _layout_labels(cfg)
+                                if parent_key in labels:
+                                    parent_name = labels[parent_key]
+                                    raise StopIteration
+                    except StopIteration:
+                        pass
+                    except Exception:
+                        pass
+
+                    # الأقسام القديمة
+                    if parent_key in CATEGORIES:
+                        parent_name = CATEGORIES.get(parent_key, parent_name)
+
+                kb = types.InlineKeyboardMarkup(row_width=1)
+
+                # إضافة مباشرة داخل الزر المختار
+                kb.add(
+                    types.InlineKeyboardButton(
+                        f"➕ إضافة داخل «{str(parent_name)[:35]}»",
+                        callback_data=f"addsub_direct|{parent_key}"
+                    )
+                )
+
+                # عرض الأقسام الفرعية الموجودة داخل هذا الزر
+                for sub in SUB_CATEGORIES.get(parent_key, []) or []:
+                    sub_cb = str(sub.get("callback", "")).strip()
+                    sub_name = str(sub.get("name", "قسم فرعي")).strip()
+
+                    if sub_cb:
+                        kb.add(
+                            types.InlineKeyboardButton(
+                                f"📂 {sub_name[:45]}",
+                                callback_data=f"addsub_child|{sub_cb}"
+                            )
+                        )
+
+                kb.add(
+                    types.InlineKeyboardButton(
+                        "🔙 رجوع لاختيار الزر",
+                        callback_data="adm_add_sub_category"
+                    )
+                )
+
+                bot.edit_message_text(
+                    f"📂 **{str(parent_name)[:50]}**\n\n"
+                    "اختر أين تريد إضافة القسم الفرعي:",
+                    chat_id,
+                    message_id,
+                    reply_markup=kb,
+                    parse_mode="Markdown"
+                )
+                return
+
+            elif data.startswith('addsub_child|'):
+                sub_cb = data.split("|", 1)[1].strip()
+
+                if not sub_cb:
+                    bot.answer_callback_query(
+                        call.id,
+                        "❌ القسم الفرعي غير صالح",
+                        show_alert=True
+                    )
+                    return
+
+                parent_key = f"sub:{sub_cb}"
+                parent_name = sub_cb
+
+                for _, subs in SUB_CATEGORIES.items():
+                    for sub in subs or []:
+                        if str(sub.get("callback", "")) == sub_cb:
+                            parent_name = str(sub.get("name", sub_cb))
+                            break
+
+                temp_add_service[chat_id] = {
+                    'category': parent_key,
+                    'parent_label': parent_name
+                }
+
+                kb = types.InlineKeyboardMarkup(row_width=1)
+                kb.add(
+                    types.InlineKeyboardButton(
+                        "🔙 إلغاء",
+                        callback_data='adm_manage_services',
+                        style=get_item_style('adm_manage_services')
+                    )
+                )
+
+                bot.edit_message_text(
+                    f"📝 **إضافة قسم فرعي داخل: {parent_name}**\n\n"
+                    "أرسل اسم القسم الفرعي الجديد:",
+                    chat_id,
+                    message_id,
+                    reply_markup=kb,
+                    parse_mode="Markdown"
+                )
+                bot.register_next_step_handler(call.message, step_subcat_name)
+                return
+
+            elif data.startswith('addsub_direct|'):
+                parent_key = data.split("|", 1)[1].strip()
+
+                if not parent_key:
+                    bot.answer_callback_query(
+                        call.id,
+                        "❌ الزر غير صالح",
+                        show_alert=True
+                    )
+                    return
+
+                temp_add_service[chat_id] = {
+                    'category': parent_key
+                }
+
+                kb = types.InlineKeyboardMarkup(row_width=1)
+                kb.add(
+                    types.InlineKeyboardButton(
+                        "🔙 إلغاء",
+                        callback_data='adm_manage_services',
+                        style=get_item_style('adm_manage_services')
+                    )
+                )
+
+                bot.edit_message_text(
+                    "📝 **أدخل اسم القسم الفرعي الجديد:**",
+                    chat_id,
+                    message_id,
+                    reply_markup=kb,
+                    parse_mode="Markdown"
+                )
                 bot.register_next_step_handler(call.message, step_subcat_name)
                 return
 
@@ -4420,29 +4760,67 @@ def query(call):
         elif data.startswith('sub_'):
             bot.answer_callback_query(call.id, "📁 تم فتح القسم الفرعي بنجاح", show_alert=False)
             markup = types.InlineKeyboardMarkup(row_width=1)
-            
-            found_services = False
+            found_items = False
+
+            # دعم الأقسام الفرعية المتداخلة
+            nested_parent_key = f"sub:{data}"
+            for sub in SUB_CATEGORIES.get(nested_parent_key, []) or []:
+                sub_cb = str(sub.get("callback", "")).strip()
+                sub_name = str(sub.get("name", "قسم فرعي")).strip()
+                if sub_cb:
+                    if not sub_cb.startswith("sub_"):
+                        sub_cb = f"sub_{sub_cb}"
+                    markup.add(
+                        types.InlineKeyboardButton(
+                            f"📁 {sub_name[:45]}",
+                            callback_data=sub_cb,
+                            style=get_item_style(sub_cb)
+                        )
+                    )
+                    found_items = True
+
+            # الخدمات الموجودة داخل هذا القسم الفرعي
             for k, v in SERVICES.items():
                 if v.get('subcat') == data:
                     if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
                         btn_text = f"{v.get('btn_label', v['name'])}"
                         if 'price' in v:
                             btn_text += f" ({get_service_display_price(v)} ن)"
-                        
-                        markup.add(types.InlineKeyboardButton(btn_text, callback_data=k, style=get_item_style(k)))
-                        found_services = True
+                        markup.add(
+                            types.InlineKeyboardButton(
+                                btn_text,
+                                callback_data=k,
+                                style=get_item_style(k)
+                            )
+                        )
+                        found_items = True
 
-            if not found_services:
-                markup.add(types.InlineKeyboardButton("⚠️ لا توجد خدمات مضافة هنا حالياً", callback_data='ignore', style=get_item_style('ignore')))
+            if not found_items:
+                markup.add(
+                    types.InlineKeyboardButton(
+                        "⚠️ لا توجد أقسام فرعية أو خدمات هنا حالياً",
+                        callback_data='ignore',
+                        style=get_item_style('ignore')
+                    )
+                )
 
-            markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='our_services', style=get_item_style('our_services')))
-            
+            markup.add(
+                types.InlineKeyboardButton(
+                    "🔙 رجوع",
+                    callback_data='our_services',
+                    style=get_item_style('our_services')
+                )
+            )
+
             _layout_snapshot(data, markup)
             _apply_button_layout(data, markup)
             try:
                 bot.edit_message_text(
-                    "📂 **أهلاً بك في هذا القسم الفرعي.**\nاختر الخدمة المطلوبة:",
-                    chat_id, message_id, reply_markup=markup, parse_mode="Markdown"
+                    "📂 **أهلاً بك في هذا القسم الفرعي.**\nاختر ما تريد:",
+                    chat_id,
+                    message_id,
+                    reply_markup=markup,
+                    parse_mode="Markdown"
                 )
             except Exception:
                 pass
@@ -5326,19 +5704,27 @@ def step_add_category_name(message):
 
 def step_subcat_name(message):
     chat_id = message.chat.id
-    subcat_name = message.text.strip()
+    subcat_name = (message.text or "").strip()
     data = temp_add_service.get(chat_id)
     if not data:
         return
-    cat_key = data.get('category')
-    
+
+    cat_key = str(data.get('category', '')).strip()
+    if not cat_key or not subcat_name:
+        bot.send_message(chat_id, "❌ البيانات غير صالحة. أعد العملية من جديد.")
+        temp_add_service.pop(chat_id, None)
+        return
+
     global SUB_CATEGORIES
     if cat_key not in SUB_CATEGORIES:
         SUB_CATEGORIES[cat_key] = []
-        
-    sub_key_id = f"sub_{int(time.time())}"
-    SUB_CATEGORIES[cat_key].append({'name': subcat_name, 'callback': sub_key_id})
-    
+
+    sub_key_id = f"sub_{int(time.time())}_{uuid.uuid4().hex[:4]}"
+    SUB_CATEGORIES[cat_key].append({
+        'name': subcat_name[:60],
+        'callback': sub_key_id
+    })
+
     try:
         supabase.table("settings").upsert({
             "key": "custom_sub_categories",
@@ -5347,8 +5733,13 @@ def step_subcat_name(message):
     except Exception as e:
         print(f"Error saving sub categories: {e}")
 
-    bot.send_message(chat_id, f"✅ **تم حفظ وعرض القسم الفرعي ({subcat_name}) بنجاح في قاعدة البيانات دائمياً!**", parse_mode="Markdown")
-    del temp_add_service[chat_id]
+    bot.send_message(
+        chat_id,
+        f"✅ **تم حفظ وعرض القسم الفرعي ({subcat_name}) بنجاح في قاعدة البيانات دائمياً!**",
+        parse_mode="Markdown"
+    )
+    temp_add_service.pop(chat_id, None)
+
 
 def step_srv_name(message):
     chat_id = message.chat.id
