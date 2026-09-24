@@ -1977,6 +1977,20 @@ def _layout_snapshot(menu_key, markup):
     data = dict(_load_button_layouts())
     old = dict(data.get(key, {}))
     old_buttons = old.get("buttons", [])
+
+    # حافظ على أسماء الأزرار المخصصة التي غيّرها الأدمن.
+    # الـsnapshot يتحدث من الـmarkup الحالي، لذلك لا نسمح له
+    # باستبدال الاسم المحفوظ بالاسم الأصلي بعد إعادة التشغيل/التحديث.
+    saved_labels = {
+        str(x.get("callback")): str(x.get("text", ""))
+        for x in old_buttons
+        if isinstance(x, dict) and x.get("callback")
+    }
+    for item in items:
+        cb = str(item.get("callback"))
+        if saved_labels.get(cb):
+            item["text"] = saved_labels[cb]
+
     old["buttons"] = items
     if not old.get("order"):
         old["order"] = [x["callback"] for x in items]
@@ -2005,13 +2019,24 @@ def _apply_button_layout(menu_key, markup):
         return markup
 
     hidden = {str(x) for x in cfg.get("hidden", [])}
+
+    # تطبيق الاسم المخصص المحفوظ على زر Telegram نفسه، وليس فقط على لوحة الإدارة.
+    saved_labels = {
+        str(x.get("callback")): str(x.get("text", ""))
+        for x in cfg.get("buttons", [])
+        if isinstance(x, dict) and x.get("callback")
+    }
+
     buttons = {}
     plain = []
     for row in getattr(markup, "keyboard", []):
         for b in row:
             cb = getattr(b, "callback_data", None)
             if cb:
-                buttons[str(cb)] = b
+                cb = str(cb)
+                if saved_labels.get(cb):
+                    b.text = saved_labels[cb]
+                buttons[cb] = b
             else:
                 plain.append(b)
 
