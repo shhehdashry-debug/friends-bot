@@ -2135,21 +2135,20 @@ def _show_layout_rename_buttons(call, key):
 
     cfg = _normalize_layout_cfg(key)
     labels = _layout_title(key, cfg)
+    rows = cfg.get("rows") or [[x] for x in cfg.get("order", [])]
+    order = [str(cb) for row in rows for cb in row]
 
     markup = types.InlineKeyboardMarkup(row_width=1)
 
-    rows = cfg.get("rows") or [[x] for x in cfg.get("order", [])]
-
-    for row in rows:
-        for cb in row:
-            button_name = labels.get(cb, cb)
-
-            markup.add(
-                types.InlineKeyboardButton(
-                    f"✏️ {button_name[:40]}",
-                    callback_data=f"layout_rename_pick|{key}|{cb}"
-                )
+    for idx, cb in enumerate(order):
+        button_name = str(labels.get(cb, cb))
+        # استخدام رقم الزر بدل callback نفسه يمنع تجاوز حد Telegram البالغ 64 بايت.
+        markup.add(
+            types.InlineKeyboardButton(
+                f"✏️ {button_name[:40]}",
+                callback_data=f"layout_rename_pick|{key}|{idx}"
             )
+        )
 
     markup.add(
         types.InlineKeyboardButton(
@@ -2158,13 +2157,25 @@ def _show_layout_rename_buttons(call, key):
         )
     )
 
-    bot.edit_message_text(
-        "✏️ **تغيير اسم زر**\n\nاختر الزر الذي تريد تغيير اسمه:",
-        call.message.chat.id,
-        call.message.message_id,
-        reply_markup=markup,
-        parse_mode="Markdown"
-    )
+    try:
+        bot.edit_message_text(
+            "✏️ **تغيير اسم زر**\n\nاختر الزر الذي تريد تغيير اسمه:",
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=markup,
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        print(f"Rename buttons menu error: {e}")
+        try:
+            bot.answer_callback_query(
+                call.id,
+                "❌ تعذر فتح قائمة تغيير الاسم",
+                show_alert=True
+            )
+        except Exception:
+            pass
+
 def _show_layout_editor(chat_id, message_id, menu_key):
     data = _load_button_layouts()
     cfg = data.get(menu_key) or _ensure_layout_target(menu_key)
@@ -2772,13 +2783,28 @@ def _handle_layout_callback(call):
             _show_layout_rename_buttons(call, key)
             return True
         if data.startswith("layout_rename_pick|"):
-            _, key, cb = data.split("|", 2)
+            _, key, idx_s = data.split("|", 2)
 
+            try:
+                idx = int(idx_s)
+            except ValueError:
+                bot.answer_callback_query(call.id, "❌ اختيار غير صالح", show_alert=True)
+                return True
+
+            cfg = _normalize_layout_cfg(key)
+            rows = cfg.get("rows") or [[x] for x in cfg.get("order", [])]
+            order = [str(cb) for row in rows for cb in row]
+
+            if idx < 0 or idx >= len(order):
+                bot.answer_callback_query(call.id, "❌ الزر غير موجود", show_alert=True)
+                return True
+
+            cb = order[idx]
             bot.answer_callback_query(call.id)
 
             msg = bot.send_message(
                 call.message.chat.id,
-                "✏️ أرسل الاسم الجديد للزر:"
+                "✏️ أرسل الاسم الجديد للزر:",
             )
 
             def receive_button_name(message):
@@ -2787,23 +2813,20 @@ def _handle_layout_callback(call):
 
                 new_name = (message.text or "").strip()
 
+                if new_name.lower() == "/cancel":
+                    bot.send_message(message.chat.id, "❌ تم إلغاء تغيير اسم الزر.")
+                    return
+
                 if not new_name:
-                    bot.send_message(
-                        message.chat.id,
-                        "❌ الاسم فارغ، أرسل اسمًا صحيحًا."
-                    )
+                    bot.send_message(message.chat.id, "❌ الاسم فارغ، أرسل اسمًا صحيحًا.")
                     return
 
                 if len(new_name) > 60:
-                    bot.send_message(
-                        message.chat.id,
-                        "❌ الاسم طويل جدًا، الحد الأقصى 60 حرف."
-                    )
+                    bot.send_message(message.chat.id, "❌ الاسم طويل جدًا، الحد الأقصى 60 حرفًا.")
                     return
 
                 all_data = dict(_load_button_layouts())
                 cfg = dict(all_data.get(key, {}))
-
                 buttons = list(cfg.get("buttons", []))
                 found = False
 
@@ -2814,10 +2837,7 @@ def _handle_layout_callback(call):
                         break
 
                 if not found:
-                    bot.send_message(
-                        message.chat.id,
-                        "❌ لم يتم العثور على الزر."
-                    )
+                    bot.send_message(message.chat.id, "❌ لم يتم العثور على الزر.")
                     return
 
                 cfg["buttons"] = buttons
@@ -2831,6 +2851,7 @@ def _handle_layout_callback(call):
 
             bot.register_next_step_handler(msg, receive_button_name)
             return True
+
         if data.startswith("layout_row|"):
             _, key, idx = data.split("|", 2)
             _show_layout_item(call, key, int(idx))
