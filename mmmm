@@ -2133,15 +2133,20 @@ def _show_layout_rename_buttons(call, key):
         )
         return
 
-    labels = _layout_labels(cfg)
+    cfg = _normalize_layout_cfg(key)
+    labels = _layout_title(key, cfg)
 
     markup = types.InlineKeyboardMarkup(row_width=1)
 
-    for cb in cfg.get("order", []):
-        if cb in labels:
+    rows = cfg.get("rows") or [[x] for x in cfg.get("order", [])]
+
+    for row in rows:
+        for cb in row:
+            button_name = labels.get(cb, cb)
+
             markup.add(
                 types.InlineKeyboardButton(
-                    f"✏️ {labels.get(cb, cb)[:40]}",
+                    f"✏️ {button_name[:40]}",
                     callback_data=f"layout_rename_pick|{key}|{cb}"
                 )
             )
@@ -2160,7 +2165,6 @@ def _show_layout_rename_buttons(call, key):
         reply_markup=markup,
         parse_mode="Markdown"
     )
-
 def _show_layout_editor(chat_id, message_id, menu_key):
     data = _load_button_layouts()
     cfg = data.get(menu_key) or _ensure_layout_target(menu_key)
