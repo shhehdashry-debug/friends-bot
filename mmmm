@@ -1155,7 +1155,44 @@ def _custom_main_markup_buttons(markup):
     return markup
 
 
-def _show_dynamic_subcategory_menu(chat_id, message_id, parent_key, parent_callback=None):
+NAV_CURRENT = {}
+NAV_BACK = {}
+
+def _nav_enter(chat_id, page_id, previous=None):
+    previous = previous if previous is not None else NAV_CURRENT.get(chat_id, "start")
+    if page_id != previous:
+        NAV_BACK.setdefault(chat_id, {})[page_id] = previous
+    NAV_CURRENT[chat_id] = page_id
+
+def _nav_go_back(call):
+    chat_id = call.message.chat.id
+    current = NAV_CURRENT.get(chat_id, "start")
+    target = NAV_BACK.setdefault(chat_id, {}).get(current, "start")
+    NAV_CURRENT[chat_id] = target
+
+    if target.startswith("dyn:"):
+        parent_key = target[4:]
+        _show_dynamic_subcategory_menu(
+            chat_id,
+            call.message.message_id,
+            parent_key,
+            None,
+            previous_override=target
+        )
+        try:
+            bot.answer_callback_query(call.id)
+        except Exception:
+            pass
+        return
+
+    if target.startswith("sub:"):
+        call.data = target[4:]
+    else:
+        call.data = target
+    query(call)
+
+
+def _show_dynamic_subcategory_menu(chat_id, message_id, parent_key, parent_callback=None, previous_override=None):
     """يعرض الأقسام الفرعية لأي زر في البوت، وليس CATEGORIES فقط."""
     subs = SUB_CATEGORIES.get(parent_key, []) or []
     markup = types.InlineKeyboardMarkup(row_width=1)
@@ -1178,10 +1215,12 @@ def _show_dynamic_subcategory_menu(chat_id, message_id, parent_key, parent_callb
             )
         )
 
-    if parent_callback and parent_callback.startswith("custom_menu|"):
-        back_cb = "start"
+    page_id = f"dyn:{parent_key}"
+    if previous_override is not None:
+        _nav_enter(chat_id, page_id, previous_override)
     else:
-        back_cb = "our_services"
+        _nav_enter(chat_id, page_id, NAV_CURRENT.get(chat_id, parent_callback or "start"))
+    back_cb = "nav_back"
 
     markup.add(
         types.InlineKeyboardButton(
@@ -1265,11 +1304,12 @@ def _show_custom_link_menu(chat_id, message_id, item_id):
             )
         )
 
+    _nav_enter(chat_id, f"custom:{item_id}", NAV_CURRENT.get(chat_id, "start"))
     markup.add(
         types.InlineKeyboardButton(
             "🔙 رجوع",
-            callback_data="start",
-            style=get_item_style("start")
+            callback_data="nav_back",
+            style=get_item_style("nav_back")
         )
     )
 
@@ -3198,6 +3238,7 @@ def _handle_layout_callback(call):
 
 
 def update_menu_safely(bot_inst, chat_id, message_id, menu_key, markup_kb):
+    _nav_enter(chat_id, menu_key, NAV_CURRENT.get(chat_id, "start"))
     _layout_snapshot(menu_key, markup_kb)
     _apply_button_layout(menu_key, markup_kb)
     text_to_show = get_menu_description(menu_key, "")
@@ -3383,6 +3424,10 @@ def query(call):
         chat_id = call.message.chat.id
         message_id = call.message.message_id
         data = call.data
+
+        if data == "nav_back":
+            _nav_go_back(call)
+            return
 
         if data in ("manual_type_quantity", "manual_type_subscription"):
             if chat_id != ADMIN_ID:
@@ -4043,64 +4088,11 @@ def query(call):
 
         elif data == 'adm_add_new_srv_cat':
             markup = types.InlineKeyboardMarkup(row_width=1)
-            all_options = []
-            seen_options = set()
-
-            def add_option(key, label):
-                key = str(key)
-                if key in seen_options:
-                    return
-                seen_options.add(key)
-                all_options.append((key, str(label)))
-
-            # 1. إضافة الأقسام الرئيسية والـ CATEGORIES
             for cat_k, cat_v in CATEGORIES.items():
-                add_option(cat_k, f"📁 {cat_v}")
-
-            # 2. إضافة الأقسام المخصصة المحفوظة في قاعدة البيانات
-            try:
-                res_cust_cats = supabase.table("settings").select("val_text").eq("key", "custom_categories_list").execute()
-                if res_cust_cats.data and res_cust_cats.data[0].get('val_text'):
-                    saved_cats = json.loads(res_cust_cats.data[0]['val_text'])
-                    for k, v in saved_cats.items():
-                        add_option(k, f"📁 {v}")
-            except Exception:
-                pass
-
-            # 3. إضافة جميع الأقسام الفرعية الموجودة في البوت (SUB_CATEGORIES)
-            for parent_key, subs in SUB_CATEGORIES.items():
-                parent_label = CATEGORIES.get(parent_key, parent_key)
-                for sub in subs or []:
-                    sub_cb = str(sub.get("callback", "")).strip()
-                    sub_name = str(sub.get("name", "قسم فرعي")).strip()
-                    if sub_cb:
-                        if not sub_cb.startswith("sub_"):
-                            sub_cb = f"sub_{sub_cb}"
-                        add_option(sub_cb, f"📂 {parent_label} ⬅️ {sub_name}")
-
-            # 4. إضافة الأزرار المخصصة (Custom Link Buttons)
-            try:
-                for item in _load_custom_link_buttons():
-                    item_id = str(item.get("id", "")).strip()
-                    item_name = str(item.get("name", "زر مخصص")).strip()
-                    if item_id and not item.get("hidden", False):
-                        add_option(f"custom_menu|{item_id}", f"🔗 {item_name}")
-            except Exception:
-                pass
-
-            if not all_options:
-                markup.add(types.InlineKeyboardButton("⚠️ لا توجد أقسام مضافة حالياً", callback_data="ignore"))
-            else:
-                for opt_key, opt_label in all_options:
-                    markup.add(types.InlineKeyboardButton(opt_label[:45], callback_data=f"addsrv_cat_{opt_key}"))
-
+                markup.add(types.InlineKeyboardButton(cat_v, callback_data=f"addsrv_cat_{cat_k}", style=get_item_style(cat_k)))
             markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
-            bot.edit_message_text(
-                "📂 **اختر القسم الرئيسي أو الفرعي أو الزر المخصص الذي تريد إضافة الخدمة فيه:**",
-                chat_id, message_id, reply_markup=markup, parse_mode="Markdown"
-            )
+            bot.edit_message_text("📂 **اختر القسم الرئيسي الذي تريد إضافة الخدمة فيه:**", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
             return
-
 
         elif data.startswith('addsrv_cat_'):
             cat_key = data.replace('addsrv_cat_', '')
@@ -4855,9 +4847,12 @@ def query(call):
 
         elif data.startswith('sub_'):
             bot.answer_callback_query(call.id, "📁 تم فتح القسم الفرعي بنجاح", show_alert=False)
+            previous_page = NAV_CURRENT.get(chat_id, "our_services")
+            _nav_enter(chat_id, f"sub:{data}", previous_page)
             markup = types.InlineKeyboardMarkup(row_width=1)
             found_items = False
 
+            # دعم الأقسام الفرعية المتداخلة
             nested_parent_key = f"sub:{data}"
             for sub in SUB_CATEGORIES.get(nested_parent_key, []) or []:
                 sub_cb = str(sub.get("callback", "")).strip()
@@ -4874,6 +4869,7 @@ def query(call):
                     )
                     found_items = True
 
+            # الخدمات الموجودة داخل هذا القسم الفرعي
             for k, v in SERVICES.items():
                 if v.get('subcat') == data:
                     if not is_item_in_maintenance(k) or chat_id == ADMIN_ID:
@@ -4898,19 +4894,11 @@ def query(call):
                     )
                 )
 
-            # 🛠️ المعالجة الذكية لزر الرجوع: يحدد القسم الأب الصحيح
-            back_target = 'our_services'
-            for parent_cat, subs in SUB_CATEGORIES.items():
-                if any(str(sub.get('callback')) == data.replace('sub_', '') for sub in subs):
-                    if parent_cat.startswith('cat_'):
-                        back_target = parent_cat
-                    break
-
             markup.add(
                 types.InlineKeyboardButton(
                     "🔙 رجوع",
-                    callback_data=back_target,
-                    style=get_item_style(back_target)
+                    callback_data='nav_back',
+                    style=get_item_style('nav_back')
                 )
             )
 
@@ -4927,7 +4915,6 @@ def query(call):
             except Exception:
                 pass
             return
-
 
         elif data == 'submit_usdt_proof':
             markup_back = types.InlineKeyboardMarkup()
@@ -5329,6 +5316,7 @@ def query(call):
 
         elif data in SERVICES:
             srv_data_item = SERVICES[data]
+            _nav_enter(chat_id, f"service:{data}", NAV_CURRENT.get(chat_id, srv_data_item.get('category', 'our_services')))
             if is_item_in_maintenance(data) and chat_id != ADMIN_ID:
                 bot.send_message(chat_id, "🛠️ هذه الخدمة قيد الصيانة حالياً.")
                 return
@@ -5349,7 +5337,7 @@ def query(call):
                     markup.add(types.InlineKeyboardButton(btn_label, callback_data=f"buytier_{srv_key}_{t_qty}", style=get_item_style(f"buytier_{srv_key}_{t_qty}")))
                 
                 markup.add(types.InlineKeyboardButton("✍️ اختيار العدد بنفسك (يدوي)", callback_data=f"custom_{srv_key}", style=get_item_style(f"custom_{srv_key}")))
-                markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='our_services', style=get_item_style('our_services')))
+                markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='nav_back', style=get_item_style('our_services')))
                 
                 custom_desc = srv_data_item.get('msg', 'اختر الكمية المطلوبة من الأزرار أدناه أو أدخلها يدوياً:')
                 text_menu = f"📦 **{srv_data_item['name']}**\n━━━━━━━━━━━━━━━━━━━\n\n{custom_desc}\n\nاختر الكمية المطلوبة:"
@@ -5375,7 +5363,7 @@ def query(call):
                     types.InlineKeyboardButton("🛒 إضافة لسلة المشتريات", callback_data='add_to_cart_now', style=get_item_style('add_to_cart_now')),
                     types.InlineKeyboardButton("✅ تأكيد الشراء الآن", callback_data='confirm_order_now', style=get_item_style('confirm_order_now')),
                     types.InlineKeyboardButton("❌ إلغاء الطلب", callback_data='cancel_order_now', style=get_item_style('cancel_order_now')),
-                    types.InlineKeyboardButton("🔙 رجوع", callback_data='our_services', style=get_item_style('our_services'))
+                    types.InlineKeyboardButton("🔙 رجوع", callback_data='nav_back', style=get_item_style('our_services'))
                 )
                 
                 text_confirm = (
@@ -5422,7 +5410,7 @@ def query(call):
             )
             
             markup_back = types.InlineKeyboardMarkup()
-            markup_back.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='our_services', style=get_item_style('our_services')))
+            markup_back.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='nav_back', style=get_item_style('our_services')))
             
             try:
                 bot.edit_message_text(text_req, chat_id, message_id, reply_markup=markup_back, parse_mode="Markdown")
@@ -5469,8 +5457,9 @@ def query(call):
                             prompt_text = "🔗 **أرسل الرابط أو المعرف المطلوب الآن:**"
 
                         text_req = f"{prompt_text}\n*(الكمية المختارة: {target_qty} - السعر: {final_price} نقطة)*"
+                        _nav_enter(chat_id, f"tier:{srv_key}:{target_qty}", NAV_CURRENT.get(chat_id, f"service:{srv_key}"))
                         markup_back = types.InlineKeyboardMarkup()
-                        markup_back.add(types.InlineKeyboardButton("🔙 رجوع", callback_data=srv_key, style=get_item_style(srv_key)))
+                        markup_back.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='nav_back', style=get_item_style(srv_key)))
                         
                         bot.edit_message_text(text_req, chat_id, message_id, reply_markup=markup_back, parse_mode="Markdown")
                         bot.register_next_step_handler(
