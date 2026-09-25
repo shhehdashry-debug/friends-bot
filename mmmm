@@ -1139,6 +1139,70 @@ def _custom_link_item(item_id):
     return next((x for x in _load_custom_link_buttons() if str(x.get("id")) == str(item_id)), None)
 
 
+
+def _all_bot_parent_targets():
+    """مصدر موحد لكل الأزرار التي يمكن أن تحتوي خدمات/أقسام فرعية."""
+    targets=[]
+    seen=set()
+
+    def add(key,title):
+        key=str(key or "").strip()
+        title=str(title or key).strip()
+        if not key or key in seen:
+            return
+        if len(key.encode("utf-8")) > 45:
+            return
+        seen.add(key)
+        targets.append((key,title))
+
+    try:
+        for key,title in _layout_targets():
+            add(key,title)
+    except Exception:
+        pass
+
+    for key,title in CATEGORIES.items():
+        add(key,title)
+
+    try:
+        for item in _load_custom_link_buttons():
+            item_id=str(item.get("id","")).strip()
+            name=str(item.get("name","زر مخصص")).strip()
+            if item_id and not item.get("hidden",False):
+                add(f"custom:{item_id}",name)
+    except Exception:
+        pass
+
+    for key in SUB_CATEGORIES.keys():
+        add(key,CATEGORIES.get(key,key))
+
+    return targets
+
+
+def _parent_display_name(parent_key):
+    parent_key=str(parent_key or "")
+    if parent_key in CATEGORIES:
+        return str(CATEGORIES[parent_key])
+    if parent_key.startswith("custom:"):
+        item=_custom_link_item(parent_key.split(":",1)[1])
+        if item:
+            return str(item.get("name","زر مخصص"))
+    for key,title in _all_bot_parent_targets():
+        if key==parent_key:
+            return title
+    return parent_key
+
+
+def _parent_services(parent_key):
+    result={}
+    for key,service in SERVICES.items():
+        if not isinstance(service,dict):
+            continue
+        if str(service.get("category",""))==parent_key or str(service.get("subcat",""))==parent_key:
+            result[key]=service
+    return result
+
+
 def _custom_main_markup_buttons(markup):
     """إضافة الأزرار المخصصة إلى الواجهة الرئيسية قبل تطبيق نظام الترتيب."""
     for item in _load_custom_link_buttons():
@@ -1196,6 +1260,14 @@ def _show_dynamic_subcategory_menu(chat_id, message_id, parent_key, parent_callb
     """يعرض الأقسام الفرعية لأي زر في البوت، وليس CATEGORIES فقط."""
     subs = SUB_CATEGORIES.get(parent_key, []) or []
     markup = types.InlineKeyboardMarkup(row_width=1)
+
+    for s_key,s_data in _parent_services(parent_key).items():
+        if not is_item_in_maintenance(s_key) or chat_id == ADMIN_ID:
+            markup.add(types.InlineKeyboardButton(
+                service_button_text(s_data, "📦"),
+                callback_data=s_key,
+                style=get_item_style(s_key)
+            ))
 
     for sub in subs:
         sub_cb = str(sub.get("callback", "")).strip()
@@ -1285,6 +1357,14 @@ def _show_custom_link_menu(chat_id, message_id, item_id):
                 style=get_item_style(visible_cb)
             )
         )
+
+    for s_key,s_data in _parent_services(f"custom:{item_id}").items():
+        if not is_item_in_maintenance(s_key) or chat_id == ADMIN_ID:
+            markup.add(types.InlineKeyboardButton(
+                service_button_text(s_data, "📦"),
+                callback_data=s_key,
+                style=get_item_style(s_key)
+            ))
 
     valid_links = 0
     for link in links:
@@ -3571,10 +3651,14 @@ def query(call):
 
             elif data == 'recolor_type_cats':
                 markup = types.InlineKeyboardMarkup(row_width=1)
-                for cat_k, cat_v in CATEGORIES.items():
-                    markup.add(types.InlineKeyboardButton(f"📁 {cat_v}", callback_data=f"pickcol_cat_{cat_k}", style=get_item_style(cat_k)))
+                for parent_key, parent_name in _all_bot_parent_targets():
+                    markup.add(types.InlineKeyboardButton(
+                        f"📁 {parent_name[:45]}",
+                        callback_data=f"pickcol_cat_{parent_key}",
+                        style=get_item_style(parent_key)
+                    ))
                 markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='adm_select_item_to_recolor', style=get_item_style('adm_select_item_to_recolor')))
-                bot.edit_message_text("📁 **اختر القسم الرئيسي لتغيير لونه:**", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+                bot.edit_message_text("📁 **اختر أي زر لتغيير لونه:**", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
                 return
 
             elif data == 'recolor_type_srvs':
@@ -3964,17 +4048,59 @@ def query(call):
             )
 
         if data == 'adm_delete_subcat_list':
-            if not SUB_CATEGORIES:
-                bot.answer_callback_query(call.id, "❌ لا توجد أقسام فرعية مضافة حالياً!", show_alert=True)
+            markup=types.InlineKeyboardMarkup(row_width=1)
+            found=False
+            for parent_key,parent_name in _all_bot_parent_targets():
+                for sub in SUB_CATEGORIES.get(parent_key,[]) or []:
+                    sub_cb=str(sub.get("callback","")).strip()
+                    if not sub_cb:
+                        continue
+                    callback=f"delsub2|{parent_key}|{sub_cb}"
+                    if len(callback.encode("utf-8"))<=64:
+                        markup.add(types.InlineKeyboardButton(
+                            f"🗑️ {parent_name[:22]} ⬅️ {str(sub.get('name','قسم فرعي'))[:30]}",
+                            callback_data=callback,
+                            style=get_item_style(sub_cb)
+                        ))
+                        found=True
+            if not found:
+                bot.answer_callback_query(call.id,"❌ لا توجد أقسام فرعية حالياً!",show_alert=True)
                 return
-            markup = types.InlineKeyboardMarkup(row_width=1)
-            for cat_key, subs in SUB_CATEGORIES.items():
-                cat_name = CATEGORIES.get(cat_key, cat_key)
-                for sub in subs:
-                    btn_text = f"🗑️ {cat_name} ⬅️ {sub['name']}"
-                    markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"delsub_{cat_key}_{sub['callback']}", style=get_item_style(sub['callback'])))
-            markup.add(types.InlineKeyboardButton("🔙 رجوع لإدارة الأقسام", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
-            bot.edit_message_text("❌ **اختر القسم الفرعي الذي تريد حذفه نهائياً:**", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+            markup.add(types.InlineKeyboardButton(
+                "🔙 رجوع لإدارة الأقسام",
+                callback_data="adm_manage_services",
+                style=get_item_style("adm_manage_services")
+            ))
+            bot.edit_message_text(
+                "❌ **اختر القسم الفرعي الذي تريد حذفه:**",
+                chat_id,message_id,reply_markup=markup
+            )
+            return
+
+        elif data.startswith('delsub2|'):
+            parts=data.split("|",2)
+            if len(parts)!=3:
+                bot.answer_callback_query(call.id,"❌ بيانات الحذف غير صحيحة",show_alert=True)
+                return
+            _,parent_key,sub_cb=parts
+            subs=SUB_CATEGORIES.get(parent_key,[]) or []
+            newsubs=[x for x in subs if str(x.get("callback",""))!=sub_cb]
+            if len(newsubs)==len(subs):
+                bot.answer_callback_query(call.id,"❌ القسم الفرعي غير موجود",show_alert=True)
+                return
+            if newsubs:
+                SUB_CATEGORIES[parent_key]=newsubs
+            else:
+                SUB_CATEGORIES.pop(parent_key,None)
+            try:
+                supabase.table("settings").upsert({
+                    "key":"custom_sub_categories",
+                    "val_text":json.dumps(SUB_CATEGORIES,ensure_ascii=False)
+                },on_conflict="key").execute()
+            except Exception as e:
+                print(f"Error saving sub categories after delete: {e}")
+            bot.answer_callback_query(call.id,"✅ تم حذف القسم الفرعي",show_alert=True)
+            admin_panel_shortcut(chat_id,message_id)
             return
 
         elif data.startswith('delsub_'):
@@ -4036,26 +4162,47 @@ def query(call):
             return
 
         elif data == 'adm_edit_descriptions':
-            markup = types.InlineKeyboardMarkup(row_width=1)
-            for cat_k, cat_name in CATEGORIES.items():
-                markup.add(types.InlineKeyboardButton(f"📁 {cat_name}", callback_data=f"editdesc_cat_{cat_k}", style=get_item_style(cat_k)))
-            markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
-            bot.edit_message_text("📝 **اختر القسم لعرض خدماته وتعديل وصف خدمة محددة:**", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+            markup=types.InlineKeyboardMarkup(row_width=1)
+            for parent_key,parent_name in _all_bot_parent_targets():
+                if _parent_services(parent_key):
+                    markup.add(types.InlineKeyboardButton(
+                        f"📁 {parent_name[:45]}",
+                        callback_data=f"editdesc_parent|{parent_key}",
+                        style=get_item_style(parent_key)
+                    ))
+            markup.add(types.InlineKeyboardButton(
+                "🔙 رجوع",callback_data="adm_manage_services",
+                style=get_item_style("adm_manage_services")
+            ))
+            bot.edit_message_text(
+                "📝 **اختر أي زر/قسم لتعديل وصف خدماته:**",
+                chat_id,message_id,reply_markup=markup
+            )
             return
 
-        elif data.startswith('editdesc_cat_'):
-            cat_key = data.replace('editdesc_cat_', '')
-            cat_name = CATEGORIES.get(cat_key, "القسم")
-            markup = types.InlineKeyboardMarkup(row_width=1)
-            cat_services = {k: v for k, v in SERVICES.items() if v.get('category') == cat_key}
-            if not cat_services:
-                bot.answer_callback_query(call.id, "❌ لا توجد خدمات مضافة في هذا القسم حالياً!", show_alert=True)
+        elif data.startswith('editdesc_parent|'):
+            parent_key=data.split("|",1)[1]
+            parent_name=_parent_display_name(parent_key)
+            services=_parent_services(parent_key)
+            if not services:
+                bot.answer_callback_query(call.id,"❌ لا توجد خدمات هنا",show_alert=True)
                 return
-            for s_key, s_data in cat_services.items():
-                s_name = s_data.get('name', 'خدمة')
-                markup.add(types.InlineKeyboardButton(f"📦 {s_name}", callback_data=f"editsrvdesc_{s_key}", style=get_item_style(s_key)))
-            markup.add(types.InlineKeyboardButton("🔙 رجوع للأقسام", callback_data='adm_edit_descriptions', style=get_item_style('adm_edit_descriptions')))
-            bot.edit_message_text(f"📁 **{cat_name}**\nاختر الخدمة التي تريد تعديل وصفها:", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+            markup=types.InlineKeyboardMarkup(row_width=1)
+            for sk,sd in services.items():
+                markup.add(types.InlineKeyboardButton(
+                    f"📦 {sd.get('name','خدمة')[:45]}",
+                    callback_data=f"editsrvdesc_{sk}",
+                    style=get_item_style(sk)
+                ))
+            markup.add(types.InlineKeyboardButton(
+                "🔙 رجوع للأزرار",
+                callback_data="adm_edit_descriptions",
+                style=get_item_style("adm_edit_descriptions")
+            ))
+            bot.edit_message_text(
+                f"📁 **{parent_name}**\nاختر الخدمة:",
+                chat_id,message_id,reply_markup=markup
+            )
             return
 
         elif data.startswith('editsrvdesc_'):
@@ -4087,39 +4234,61 @@ def query(call):
             return
 
         elif data == 'adm_add_new_srv_cat':
-            markup = types.InlineKeyboardMarkup(row_width=1)
-            for cat_k, cat_v in CATEGORIES.items():
-                markup.add(types.InlineKeyboardButton(cat_v, callback_data=f"addsrv_cat_{cat_k}", style=get_item_style(cat_k)))
-            markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
-            bot.edit_message_text("📂 **اختر القسم الرئيسي الذي تريد إضافة الخدمة فيه:**", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+            markup=types.InlineKeyboardMarkup(row_width=1)
+            for parent_key,parent_name in _all_bot_parent_targets():
+                markup.add(types.InlineKeyboardButton(
+                    f"📁 {parent_name[:45]}",
+                    callback_data=f"addsrv_parent|{parent_key}",
+                    style=get_item_style(parent_key)
+                ))
+            markup.add(types.InlineKeyboardButton(
+                "🔙 رجوع",
+                callback_data="adm_manage_services",
+                style=get_item_style("adm_manage_services")
+            ))
+            bot.edit_message_text(
+                "📂 **اختر أي زر/قسم تريد إضافة الخدمة داخله:**",
+                chat_id,message_id,reply_markup=markup
+            )
             return
 
-        elif data.startswith('addsrv_cat_'):
-            cat_key = data.replace('addsrv_cat_', '')
-            temp_add_service[chat_id] = {'category': cat_key}
-            subs = list(SUB_CATEGORIES.get(cat_key, []))
-            # Instagram لم يعد يحتوي أقساماً فرعية افتراضية.
-            if cat_key == 'cat_insta':
-                subs = []
+        elif data.startswith('addsrv_parent|'):
+            parent_key=data.split("|",1)[1].strip()
+            parent_name=_parent_display_name(parent_key)
+            temp_add_service[chat_id]={'category':parent_key}
 
+            subs=list(SUB_CATEGORIES.get(parent_key,[]) or [])
             if subs:
-                markup = types.InlineKeyboardMarkup(row_width=1)
+                markup=types.InlineKeyboardMarkup(row_width=1)
                 for sub in subs:
-                    cb_val = sub.get('callback')
-                    if not cb_val.startswith('sub_') and not cb_val.startswith('subcat_'):
-                        cb_val = f"sub_{cb_val}"
-                    markup.add(types.InlineKeyboardButton(f"📁 {sub['name']}", callback_data=f"srv_sub_{sub.get('callback')}", style=get_item_style(cb_val)))
-                
-                markup.add(types.InlineKeyboardButton("⚙️ بدون قسم فرعي (القسم الرئيسي مباشرة)", callback_data="srv_sub_none", style=get_item_style('srv_sub_none')))
-                markup.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
-                bot.edit_message_text("📂 **هذا القسم يحتوي على أقسام فرعية، اختر القسم الفرعي الذي ستنتمي إليه الخدمة:**", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+                    sub_cb=str(sub.get("callback","")).strip()
+                    if not sub_cb:
+                        continue
+                    visible=sub_cb if sub_cb.startswith("sub_") else f"sub_{sub_cb}"
+                    markup.add(types.InlineKeyboardButton(
+                        f"📁 {str(sub.get('name','قسم فرعي'))[:45]}",
+                        callback_data=f"srv_sub_{sub_cb}",
+                        style=get_item_style(visible)
+                    ))
+                markup.add(types.InlineKeyboardButton(
+                    "⚙️ بدون قسم فرعي (داخل الزر مباشرة)",
+                    callback_data="srv_sub_none"
+                ))
+                markup.add(types.InlineKeyboardButton(
+                    "🔙 إلغاء",callback_data="adm_manage_services",
+                    style=get_item_style("adm_manage_services")
+                ))
+                bot.edit_message_text(
+                    f"📂 **{parent_name}** يحتوي أقساماً فرعية.\nاختر مكان الخدمة:",
+                    chat_id,message_id,reply_markup=markup
+                )
                 return
 
-            text_req = "📝 **أدخل اسم الخدمة الجديدة التي ستظهر للمستخدمين:**"
-            markup_back = types.InlineKeyboardMarkup()
-            markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
-            bot.edit_message_text(text_req, chat_id, message_id, reply_markup=markup_back, parse_mode="Markdown")
-            bot.register_next_step_handler(call.message, step_srv_name)
+            bot.edit_message_text(
+                f"📝 **إضافة خدمة داخل: {parent_name}**\n\nأدخل اسم الخدمة الجديدة:",
+                chat_id,message_id
+            )
+            bot.register_next_step_handler(call.message,step_srv_name)
             return
 
         elif data.startswith('srv_sub_'):
@@ -4138,77 +4307,91 @@ def query(call):
             return
 
         elif data == 'adm_delete_srv_list':
-            try:
-                bot.answer_callback_query(call.id, "🔄 جاري فتح الأقسام...")
-
-                markup = types.InlineKeyboardMarkup()
-
-                for cat_k, cat_v in CATEGORIES.items():
-
-                    # نتأكد أن callback_data ضمن حدود Telegram
-                    callback_data = f"adm_del_cat_srvs_{cat_k}"
-
-                    if len(callback_data.encode("utf-8")) > 64:
-                        print(
-                            f"⚠️ callback_data طويل للقسم: "
-                            f"{cat_k} | {len(callback_data.encode('utf-8'))} bytes"
-                        )
-                        continue
-
-                    markup.add(
-                        types.InlineKeyboardButton(
-                            str(cat_v),
-                            callback_data=callback_data
-                        )
-                    )
-
-                markup.add(
-                    types.InlineKeyboardButton(
-                        "🔙 رجوع",
-                        callback_data="adm_manage_services"
-                    )
-                )
-
-                bot.edit_message_text(
-                    "📌 اختر القسم لعرض خدماته وحذفها فوراً، أو لحذف القسم كله:",
-                    chat_id,
-                    message_id,
-                    reply_markup=markup
-                )
-
-            except Exception as e:
-                print(f"❌ Delete services menu error: {e}")
-
-                try:
-                    bot.answer_callback_query(
-                        call.id,
-                        "❌ حدث خطأ أثناء فتح قائمة الحذف",
-                        show_alert=True
-                    )
-                except Exception:
-                    pass
-
+            markup=types.InlineKeyboardMarkup(row_width=1)
+            for parent_key,parent_name in _all_bot_parent_targets():
+                if _parent_services(parent_key) or SUB_CATEGORIES.get(parent_key):
+                    markup.add(types.InlineKeyboardButton(
+                        f"📁 {parent_name[:45]}",
+                        callback_data=f"adm_del_parent|{parent_key}",
+                        style=get_item_style(parent_key)
+                    ))
+            markup.add(types.InlineKeyboardButton(
+                "🔙 رجوع",
+                callback_data="adm_manage_services"
+            ))
+            bot.edit_message_text(
+                "📌 **اختر أي زر لعرض خدماته وأقسامه وحذفها:**",
+                chat_id,message_id,reply_markup=markup
+            )
             return
 
-        elif data.startswith('adm_del_cat_srvs_'):
-            cat_key = data.replace('adm_del_cat_srvs_', '')
-            cat_name = CATEGORIES.get(cat_key, "القسم")
-            markup = types.InlineKeyboardMarkup(row_width=1)
-            cat_services = {k: v for k, v in SERVICES.items() if v.get('category') == cat_key}
-            seen_names = set()
-            for s_key, s_data in cat_services.items():
-                name = s_data['name']
-                base_name = name
-                for suffix in [' 1k', ' 2k', ' 3k', ' 4k', ' 5k', ' 10k', ' (ضمان 20 يوم)', ' ثابت', ' فلاش', ' دراجون']:
-                    if suffix in base_name:
-                        base_name = base_name.replace(suffix, '')
-                base_name = base_name.strip()
-                if base_name not in seen_names:
-                    seen_names.add(base_name)
-                    markup.add(types.InlineKeyboardButton(f"🗑️ {base_name}", callback_data=f"delgroup_{cat_key}_{s_key}", style=get_item_style(s_key)))
-            markup.add(types.InlineKeyboardButton(f"❌ حذف القسم بالكامل ({cat_name})", callback_data=f"delcat_{cat_key}", style=get_item_style(cat_key)))
-            markup.add(types.InlineKeyboardButton("🔙 رجوع للأقسام", callback_data='adm_delete_srv_list', style=get_item_style('adm_delete_srv_list')))
-            bot.edit_message_text(f"📁 **{cat_name}**\nاختر الخدمة الرئيسية لحذفها كـ مجموعة نهائياً:", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+        elif data.startswith('adm_del_parent|'):
+            parent_key=data.split("|",1)[1]
+            parent_name=_parent_display_name(parent_key)
+            markup=types.InlineKeyboardMarkup(row_width=1)
+
+            for sk,sd in _parent_services(parent_key).items():
+                markup.add(types.InlineKeyboardButton(
+                    f"🗑️ {sd.get('name','خدمة')[:45]}",
+                    callback_data=f"delservice2|{sk}",
+                    style=get_item_style(sk)
+                ))
+
+            for sub in SUB_CATEGORIES.get(parent_key,[]) or []:
+                sub_cb=str(sub.get("callback","")).strip()
+                if sub_cb:
+                    markup.add(types.InlineKeyboardButton(
+                        f"📂 حذف: {str(sub.get('name','قسم فرعي'))[:35]}",
+                        callback_data=f"delsub2|{parent_key}|{sub_cb}"
+                    ))
+
+            if parent_key in CATEGORIES:
+                markup.add(types.InlineKeyboardButton(
+                    f"❌ حذف القسم بالكامل ({parent_name[:30]})",
+                    callback_data=f"delcat_{parent_key}",
+                    style=get_item_style(parent_key)
+                ))
+
+            markup.add(types.InlineKeyboardButton(
+                "🔙 رجوع للأزرار",
+                callback_data="adm_delete_srv_list"
+            ))
+
+            bot.edit_message_text(
+                f"📁 **{parent_name}**\nاختر ما تريد حذفه:",
+                chat_id,message_id,reply_markup=markup,parse_mode="Markdown"
+            )
+            return
+
+        elif data.startswith('delservice2|'):
+            sk=data.split("|",1)[1]
+            if sk not in SERVICES:
+                bot.answer_callback_query(call.id,"❌ الخدمة غير موجودة",show_alert=True)
+                return
+
+            try:
+                del SERVICES[sk]
+                try:
+                    supabase.table("deleted_services").upsert(
+                        {"srv_key":sk},on_conflict="srv_key"
+                    ).execute()
+                except Exception as e:
+                    print(f"DB Error deleted_services: {e}")
+
+                custom_only={k:v for k,v in SERVICES.items() if k.startswith("custom_srv_")}
+                try:
+                    supabase.table("settings").upsert({
+                        "key":"custom_services_list",
+                        "val_text":json.dumps(custom_only,ensure_ascii=False) if custom_only else ""
+                    },on_conflict="key").execute()
+                except Exception as e:
+                    print(f"Settings error: {e}")
+
+                bot.answer_callback_query(call.id,"✅ تم حذف الخدمة",show_alert=True)
+                admin_panel_shortcut(chat_id,message_id)
+            except Exception as e:
+                print(f"Dynamic service delete error: {e}")
+                bot.answer_callback_query(call.id,"❌ حدث خطأ أثناء الحذف",show_alert=True)
             return
 
         elif data == 'adm_menu_finance':
@@ -4589,36 +4772,69 @@ def query(call):
             return
 
         elif data == 'maint_menu_categories':
-            markup = types.InlineKeyboardMarkup(row_width=1)
-            for cat_k, cat_v in CATEGORIES.items():
-                st = "🛠️ (صيانة)" if is_item_in_maintenance(cat_k) else "🟢 (شغال)"
-                markup.add(types.InlineKeyboardButton(f"{cat_v} - {st}", callback_data=f"toggle_maint_{cat_k}", style=get_item_style(cat_k)))
-            markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='adm_maint_services_by_cat', style=get_item_style('adm_maint_services_by_cat')))
-            bot.edit_message_text("📁 **صيانة الأقسام الرئيسية:**\nاضغط على القسم لتفعيل أو إلغاء الصيانة عنه:", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+            markup=types.InlineKeyboardMarkup(row_width=1)
+            for parent_key,parent_name in _all_bot_parent_targets():
+                st="🛠️ (صيانة)" if is_item_in_maintenance(parent_key) else "🟢 (شغال)"
+                markup.add(types.InlineKeyboardButton(
+                    f"{parent_name[:42]} - {st}",
+                    callback_data=f"toggle_maint_{parent_key}",
+                    style=get_item_style(parent_key)
+                ))
+            markup.add(types.InlineKeyboardButton(
+                "🔙 رجوع",
+                callback_data="adm_maint_services_by_cat",
+                style=get_item_style("adm_maint_services_by_cat")
+            ))
+            bot.edit_message_text(
+                "📁 **صيانة كل أزرار البوت:**",
+                chat_id,message_id,reply_markup=markup
+            )
             return
 
         elif data == 'maint_menu_services_list':
-            markup = types.InlineKeyboardMarkup(row_width=1)
-            for cat_k, cat_v in CATEGORIES.items():
-                markup.add(types.InlineKeyboardButton(f"📁 {cat_v}", callback_data=f"maint_srvs_cat_{cat_k}", style=get_item_style(cat_k)))
-            markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='adm_maint_services_by_cat', style=get_item_style('adm_maint_services_by_cat')))
-            bot.edit_message_text("📦 **اختر القسم لعرض خدماته والتحكم بصيانتها:**", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+            markup=types.InlineKeyboardMarkup(row_width=1)
+            for parent_key,parent_name in _all_bot_parent_targets():
+                if _parent_services(parent_key):
+                    markup.add(types.InlineKeyboardButton(
+                        f"📁 {parent_name[:45]}",
+                        callback_data=f"maint_srvs_parent_{parent_key}",
+                        style=get_item_style(parent_key)
+                    ))
+            markup.add(types.InlineKeyboardButton(
+                "🔙 رجوع",
+                callback_data="adm_maint_services_by_cat",
+                style=get_item_style("adm_maint_services_by_cat")
+            ))
+            bot.edit_message_text(
+                "📦 **اختر أي زر لعرض خدماته وصيانتها:**",
+                chat_id,message_id,reply_markup=markup
+            )
             return
 
-        elif data.startswith('maint_srvs_cat_'):
-            cat_key = data.replace('maint_srvs_cat_', '')
-            cat_name = CATEGORIES.get(cat_key, "القسم")
-            markup = types.InlineKeyboardMarkup(row_width=1)
-            cat_services = {k: v for k, v in SERVICES.items() if v.get('category') == cat_key}
-            if not cat_services:
-                bot.answer_callback_query(call.id, "❌ لا توجد خدمات في هذا القسم حالياً!", show_alert=True)
+        elif data.startswith('maint_srvs_parent_'):
+            parent_key=data.replace('maint_srvs_parent_','',1)
+            parent_name=_parent_display_name(parent_key)
+            services=_parent_services(parent_key)
+            markup=types.InlineKeyboardMarkup(row_width=1)
+            if not services:
+                bot.answer_callback_query(call.id,"❌ لا توجد خدمات هنا",show_alert=True)
                 return
-            for s_key, s_data in cat_services.items():
-                s_name = s_data.get('name', 'خدمة')
-                s_st = "🛠️ (صيانة)" if is_item_in_maintenance(s_key) else "🟢 (شغال)"
-                markup.add(types.InlineKeyboardButton(f"📦 {s_name} - {s_st}", callback_data=f"toggle_maint_{s_key}", style=get_item_style(s_key)))
-            markup.add(types.InlineKeyboardButton("🔙 رجوع للأقسام", callback_data='maint_menu_services_list', style=get_item_style('maint_menu_services_list')))
-            bot.edit_message_text(f"📁 **{cat_name}**\nاختر الخدمة لتفعيل أو إلغاء الصيانة عنها:", chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+            for sk,sd in services.items():
+                st="🛠️ (صيانة)" if is_item_in_maintenance(sk) else "🟢 (شغال)"
+                markup.add(types.InlineKeyboardButton(
+                    f"📦 {sd.get('name','خدمة')[:42]} - {st}",
+                    callback_data=f"toggle_maint_{sk}",
+                    style=get_item_style(sk)
+                ))
+            markup.add(types.InlineKeyboardButton(
+                "🔙 رجوع للأزرار",
+                callback_data="maint_menu_services_list",
+                style=get_item_style("maint_menu_services_list")
+            ))
+            bot.edit_message_text(
+                f"📁 **{parent_name}**\nاختر الخدمة:",
+                chat_id,message_id,reply_markup=markup
+            )
             return
 
         elif data.startswith('toggle_maint_'):
@@ -4842,6 +5058,8 @@ def query(call):
             for cat_k, cat_v in CATEGORIES.items():
                 if not is_item_in_maintenance(cat_k) or chat_id == ADMIN_ID:
                     markup.add(types.InlineKeyboardButton(cat_v, callback_data=cat_k, style=get_item_style(cat_k)))
+            # الأزرار المخصصة تظهر أيضاً داخل قائمة الخدمات.
+            _custom_main_markup_buttons(markup)
             markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='start', style=get_item_style('start')))
             update_menu_safely(bot, chat_id, message_id, 'our_services', markup)
 
