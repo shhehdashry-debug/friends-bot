@@ -1213,37 +1213,81 @@ def _show_custom_link_menu(chat_id, message_id, item_id):
     if not item:
         bot.send_message(chat_id, "❌ هذا الزر لم يعد موجوداً.")
         return
+
     links = item.get("links", [])
     markup = types.InlineKeyboardMarkup(row_width=1)
 
-    # الأقسام الفرعية داخل الزر المخصص
-    custom_parent_key = f"custom:{item_id}"
-    for sub in SUB_CATEGORIES.get(custom_parent_key, []) or []:
-        sub_cb = str(sub.get("callback", "")).strip()
-        sub_name = str(sub.get("name", "قسم فرعي")).strip()
-        if sub_cb:
-            if not sub_cb.startswith("sub_"):
-                sub_cb = f"sub_{sub_cb}"
-            markup.add(
-                types.InlineKeyboardButton(
-                    f"📁 {sub_name[:45]}",
-                    callback_data=sub_cb,
-                    style=get_item_style(sub_cb)
-                )
+    possible_parent_keys = [
+        f"custom:{item_id}",
+        f"custom_menu|{item_id}",
+        str(item_id),
+    ]
+
+    sub_items = []
+    seen_subs = set()
+
+    for parent_key in possible_parent_keys:
+        for sub in SUB_CATEGORIES.get(parent_key, []) or []:
+            if not isinstance(sub, dict):
+                continue
+            sub_cb = str(sub.get("callback", "")).strip()
+            sub_name = str(sub.get("name", "قسم فرعي")).strip()
+            if not sub_cb or sub_cb in seen_subs:
+                continue
+            seen_subs.add(sub_cb)
+            sub_items.append((sub_cb, sub_name))
+
+    for sub_cb, sub_name in sub_items:
+        visible_cb = sub_cb if sub_cb.startswith("sub_") else f"sub_{sub_cb}"
+        markup.add(
+            types.InlineKeyboardButton(
+                f"📁 {sub_name[:45]}",
+                callback_data=visible_cb,
+                style=get_item_style(visible_cb)
             )
+        )
+
+    valid_links = 0
     for link in links:
+        if not isinstance(link, dict):
+            continue
         url = str(link.get("url", "")).strip()
         name = str(link.get("name", "رابط")).strip()
         if url and re.match(r"^https?://", url, re.I):
             markup.add(types.InlineKeyboardButton(name[:60], url=url))
-    markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="start", style=get_item_style("start")))
+            valid_links += 1
+
+    if not sub_items and valid_links == 0:
+        markup.add(
+            types.InlineKeyboardButton(
+                "⚠️ لا توجد أقسام أو روابط مضافة حالياً.",
+                callback_data="ignore"
+            )
+        )
+
+    markup.add(
+        types.InlineKeyboardButton(
+            "🔙 رجوع",
+            callback_data="start",
+            style=get_item_style("start")
+        )
+    )
+
     text = f"📚 **{item.get('name', 'شروحات البوت')}**\n\nاختر ما تريد فتحه:"
-    if not links:
-        text += "\n\n⚠️ لا توجد روابط مضافة حالياً."
+
     try:
-        bot.edit_message_text(text, chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
+        bot.edit_message_text(
+            text, chat_id, message_id,
+            reply_markup=markup,
+            parse_mode="Markdown"
+        )
     except Exception:
-        bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+        bot.send_message(
+            chat_id, text,
+            reply_markup=markup,
+            parse_mode="Markdown"
+        )
+
 
 
 def _show_custom_buttons_admin(chat_id, message_id=None):
@@ -3686,11 +3730,10 @@ def query(call):
                 else:
                     for parent_key, title in parent_buttons:
                         # callback_data هنا قصير؛ المفتاح الحقيقي محفوظ داخلياً.
-                        safe_key = parent_key[:45]
                         markup.add(
                             types.InlineKeyboardButton(
                                 f"📁 {title[:45]}",
-                                callback_data=f"addsub_parent|{safe_key}"
+                                callback_data=f"addsub_parent|{parent_key}"
                             )
                         )
 
