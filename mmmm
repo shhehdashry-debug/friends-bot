@@ -59,6 +59,8 @@ admin_asia_data = {
 
 user_click_tracker = {}
 pending_orders_cache = {}  
+# رسائل تتبع الطلبات المفتوحة: (chat_id, order_id) -> message_id
+ORDER_TRACKING_MESSAGES = {}
 transfer_cache = {}        
 user_carts = {}            
 maintenance_items = set()  
@@ -1881,6 +1883,112 @@ def referral_menu(chat_id, message_id):
     )
     bot.edit_message_text(text, chat_id, message_id, reply_markup=markup, parse_mode="Markdown")
 
+def _order_progress_bar(done, total, width=12):
+    if not total or total <= 0:
+        return "░" * width
+    ratio = max(0.0, min(1.0, float(done) / float(total)))
+    filled = int(round(ratio * width))
+    return "█" * filled + "░" * (width - filled)
+
+
+def _order_live_progress(order, res_status):
+    if not isinstance(res_status, dict):
+        return None
+    try:
+        total = int(float(order.get("quantity") or 0))
+    except Exception:
+        total = 0
+    try:
+        remains = int(float(res_status.get("remains")))
+    except Exception:
+        return None
+    if total <= 0:
+        return None
+    remains = max(0, min(total, remains))
+    delivered = total - remains
+    try:
+        start_count = int(float(res_status.get("start_count")))
+    except Exception:
+        start_count = None
+    current_count = start_count + delivered if start_count is not None else None
+    percent = max(0, min(100, int(round((delivered / total) * 100))))
+    return {"total": total, "remains": remains, "delivered": delivered, "start_count": start_count, "current_count": current_count, "percent": percent}
+
+
+def _order_tracking_text(order, res_status=None):
+    service = str(order.get("service") or "الخدمة").replace("<", "&lt;").replace(">", "&gt;")
+    order_id = order.get("order_id", "-")
+    status = str(order.get("status") or "قيد التنفيذ")
+    if not isinstance(res_status, dict):
+        return (f"📦 <b>طلب #{order_id}</b>\n" f"🛍️ <b>الخدمة:</b> {service}\n" f"💰 <b>السعر:</b> {order.get('price', 0)} نقطة\n\n" f"⏳ <b>{status}</b>\n⚠️ تعذر جلب التقدم من المزود حالياً.")
+    live_status = str(res_status.get("status") or status)
+    if live_status in ("Completed", "المكتملة", "مكتمل"):
+        status_text = "مكتمل ✅"
+    elif live_status in ("Canceled", "Cancelled", "المبلغ المسترد", "ملغي"):
+        status_text = "ملغي ❌"
+    else:
+        status_text = "قيد التنفيذ ⏳"
+    progress = _order_live_progress(order, res_status)
+    if not progress:
+        return (f"📦 <b>طلب #{order_id}</b>\n" f"🛍️ <b>الخدمة:</b> {service}\n" f"💰 <b>السعر:</b> {order.get('price', 0)} نقطة\n\n" f"{status_text}\n⚠️ لا تتوفر بيانات التقدم من المزود حالياً.")
+    done, total = progress["delivered"], progress["total"]
+    bar = _order_progress_bar(done, total)
+    current = f"\n👥 <b>العدد الحالي:</b> <code>{progress['current_count']}</code>" if progress["current_count"] is not None else ""
+    return (f"📦 <b>طلب #{order_id}</b>\n" f"🛍️ <b>الخدمة:</b> {service}\n" f"💰 <b>السعر:</b> {order.get('price', 0)} نقطة\n\n" f"📊 <b>التقدم:</b> {done} / {total} ({progress['percent']}%)\n" f"<code>{bar}</code>\n" f"📉 <b>المتبقي:</b> <code>{progress['remains']}</code>{current}\n\n{status_text}")
+
+
+def _order_tracking_markup(order_id, api_order_id):
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    if str(api_order_id or "0") != "0":
+        markup.add(types.InlineKeyboardButton("🔄 تحديث التقدم الآن", callback_data=f"track_order_{order_id}", style=get_item_style(f"track_order_{order_id}")))
+    return markup
+
+
+def _send_order_tracking_card(chat_id, order):
+    api_order_id = str(order.get("api_order_id") or "0")
+    res_status = None
+    if api_order_id != "0":
+        try:
+            res_status = get_status(api_order_id)
+        except Exception as e:
+            print(f"Order progress status error {order.get('order_id')}: {e}")
+    text = _order_tracking_text(order, res_status)
+    markup = _order_tracking_markup(order.get("order_id"), api_order_id)
+    msg = bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=markup if markup.keyboard else None)
+    if api_order_id != "0":
+        ORDER_TRACKING_MESSAGES[(chat_id, int(order.get("order_id")))] = msg.message_id
+    return msg
+
+
+def _auto_update_open_order_tracking():
+    while True:
+        time.sleep(60)
+        for (chat_id, order_id), message_id in list(ORDER_TRACKING_MESSAGES.items()):
+            try:
+                res = supabase.table("user_orders").select("*").eq("order_id", order_id).eq("user_id", chat_id).execute()
+                if not res.data:
+                    ORDER_TRACKING_MESSAGES.pop((chat_id, order_id), None)
+                    continue
+                order = res.data[0]
+                api_order_id = str(order.get("api_order_id") or "0")
+                if api_order_id == "0":
+                    ORDER_TRACKING_MESSAGES.pop((chat_id, order_id), None)
+                    continue
+                res_status = get_status(api_order_id)
+                markup = _order_tracking_markup(order_id, api_order_id)
+                try:
+                    bot.edit_message_text(_order_tracking_text(order, res_status), chat_id, message_id, parse_mode="HTML", reply_markup=markup if markup.keyboard else None)
+                except Exception as edit_err:
+                    if "message is not modified" not in str(edit_err).lower():
+                        print(f"Order tracking edit error {order_id}: {edit_err}")
+                if isinstance(res_status, dict):
+                    live_status = str(res_status.get("status") or "")
+                    if live_status in ("Completed", "المكتملة", "مكتمل", "Canceled", "Cancelled", "المبلغ المسترد", "ملغي"):
+                        ORDER_TRACKING_MESSAGES.pop((chat_id, order_id), None)
+            except Exception as e:
+                print(f"Order tracking loop error {order_id}: {e}")
+
+
 def auto_check_orders_and_notifications():
     while True:
         try:
@@ -1920,6 +2028,7 @@ def auto_check_orders_and_notifications():
             print(f"Auto thread error: {e}")
 
 threading.Thread(target=auto_check_orders_and_notifications, daemon=True).start()
+threading.Thread(target=_auto_update_open_order_tracking, daemon=True).start()
 
 ORDERS_COUNT_CACHE = {"value": 0, "time": 0}
 ORDERS_COUNT_CACHE_TTL = 60  # ثانية
@@ -5502,28 +5611,26 @@ def query(call):
             else:
                 bot.send_message(chat_id, "📦 <b>سجل طلباتك الأخيرة (مع التتبع المباشر للـ API):</b>\n━━━━━━━━━━━━━━━━━━━", parse_mode="HTML")
                 for o in orders:
-                    s_name = str(o['service']).replace('<', '&lt;').replace('>', '&gt;')
-                    icon = "⏳" if "قيد" in str(o['status']) else ("❌" if "ملغي" in str(o['status']) else "✅")
-                    markup_ord = types.InlineKeyboardMarkup()
-                    if str(o.get('api_order_id')) != "0":
-                        markup_ord.add(types.InlineKeyboardButton("🔄 تحديث حالة الطلب لحظياً", callback_data=f"track_order_{o['order_id']}", style=get_item_style(f"track_order_{o['order_id']}")))
-                    
-                    text = (
-                        f"🆔 <b>رقم الطلب:</b> <code>{o['order_id']}</code>\n"
-                        f"🛍️ <b>الخدمة:</b> {s_name}\n"
-                        f"💰 <b>السعر:</b> {o['price']} نقطة\n"
-                        f"{icon} <b>الحالة:</b> {o['status']}"
-                    )
-                    bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=markup_ord if markup_ord.keyboard else None)
+                    _send_order_tracking_card(chat_id, o)
 
         elif data.startswith('track_order_'):
             o_id = int(data.replace('track_order_', ''))
             res = supabase.table("user_orders").select("*").eq("order_id", o_id).eq("user_id", chat_id).execute()
             if res.data:
                 ord_info = res.data[0]
-                live_info = check_order_live_status(o_id, ord_info.get('api_order_id'))
-                bot.answer_callback_query(call.id, "✅ تم جلب أحدث حالة للطلب بنجاح!", show_alert=False)
-                bot.send_message(chat_id, f"🔍 **نتيجة التتبع المباشر للطلب (`{o_id}`):**\n\n{live_info}", parse_mode="Markdown")
+                api_order_id = str(ord_info.get("api_order_id") or "0")
+                if api_order_id == "0":
+                    bot.answer_callback_query(call.id, "ℹ️ هذا الطلب يدوي ولا يحتوي تتبع API.", show_alert=True)
+                    return
+                try:
+                    res_status = get_status(api_order_id)
+                    markup = _order_tracking_markup(o_id, api_order_id)
+                    bot.edit_message_text(_order_tracking_text(ord_info, res_status), chat_id, message_id, parse_mode="HTML", reply_markup=markup if markup.keyboard else None)
+                    ORDER_TRACKING_MESSAGES[(chat_id, o_id)] = message_id
+                    bot.answer_callback_query(call.id, "✅ تم تحديث التقدم الآن.", show_alert=False)
+                except Exception as e:
+                    print(f"Track order callback error {o_id}: {e}")
+                    bot.answer_callback_query(call.id, "⚠️ تعذر تحديث التقدم حالياً.", show_alert=True)
 
         elif data == 'enter_voucher_code':
             text_req = "🔑 **أرسل كود الشحن أو الهدية الآن:**"
@@ -6348,69 +6455,233 @@ def skip_manual_srv_desc(chat_id):
 
 def step_manual_srv_save_final(message):
     chat_id = message.chat.id
-    text_val = message.text.strip()
-    
+    text_val = (message.text or "").strip()
+
     if text_val == "إلغاء":
-        if chat_id in temp_add_service:
-            del temp_add_service[chat_id]
+        temp_add_service.pop(chat_id, None)
         bot.send_message(chat_id, "❌ تم إلغاء إضافة الخدمة.")
         return
 
     srv = temp_add_service.get(chat_id)
-    if not srv: 
+    if not srv:
         return
+
+    manual_type = srv.get('manual_type', 'subscription')
+
     try:
+        # التمويل: عدة مستويات، والصيغة:
+        # 1000:6
+        # 2000 بنات فقط:12
+        # 3000 شباب فقط:18
+        #
+        # الجزء قبل ":" = الكمية + وصف اختياري
+        # الجزء بعد ":" = السعر
+        if manual_type == 'financing':
+            tiers = []
+            seen_qty = set()
+
+            for raw_line in text_val.splitlines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+
+                if ':' not in line:
+                    raise ValueError("كل سطر يجب أن يكون بالشكل: الكمية الوصف الاختياري:السعر")
+
+                left, right = line.rsplit(':', 1)
+                left = left.strip()
+                right = right.strip()
+
+                if not right:
+                    raise ValueError("السعر مفقود")
+
+                price = float(right)
+                if price <= 0:
+                    raise ValueError("السعر يجب أن يكون أكبر من 0")
+
+                # أول رقم في بداية السطر هو الكمية.
+                m = re.match(r'^(\d+)(?:\s+(.*))?$', left)
+                if not m:
+                    raise ValueError("الكمية يجب أن تبدأ برقم صحيح")
+
+                qty = int(m.group(1))
+                label = (m.group(2) or "").strip()
+
+                if qty <= 0:
+                    raise ValueError("الكمية يجب أن تكون أكبر من 0")
+
+                if qty in seen_qty:
+                    raise ValueError(f"الكمية {qty} مكررة")
+
+                seen_qty.add(qty)
+                tiers.append({
+                    "qty": qty,
+                    "label": label,
+                    "price": price
+                })
+
+            if not tiers:
+                raise ValueError("لم يتم العثور على أي مستوى تمويل")
+
+            category_val = srv.get('category')
+            subcat_val = srv.get('subcat')
+            key = f"custom_srv_{int(time.time())}"
+
+            service_payload = {
+                'name': srv['name'],
+                'btn_label': srv.get('name', '💰 خدمة تمويل'),
+                'service_id': 0,
+                'category': category_val,
+                'subcat': subcat_val,
+                'msg': srv.get(
+                    'msg',
+                    '🎮 **أرسل المعلومات أو الآيدي المطلوب:**'
+                ),
+                'price': tiers[0]['price'],
+                'qty': tiers[0]['qty'],
+                'is_custom_tiers': True,
+                'financing': True,
+                'tiers': tiers
+            }
+
+            SERVICES[key] = service_payload
+
+            try:
+                supabase.table("custom_services").upsert({
+                    "service_key": key,
+                    "category": category_val,
+                    "subcat": subcat_val,
+                    "service_data": json.dumps(
+                        service_payload,
+                        ensure_ascii=False
+                    )
+                }, on_conflict="service_key").execute()
+            except Exception as db_err:
+                print(
+                    f"Error saving financing service to Supabase: {db_err}"
+                )
+
+            preview = "\n".join(
+                f"• {x['qty']}"
+                + (f" {x['label']}" if x['label'] else "")
+                + f" — {x['price']} ن"
+                for x in tiers
+            )
+
+            bot.send_message(
+                chat_id,
+                "✅ **تمت إضافة خدمة التمويل بنجاح!**\n\n"
+                f"🏷️ الخدمة: **{srv['name']}**\n\n"
+                f"{preview}",
+                parse_mode="Markdown"
+            )
+
+            temp_add_service.pop(chat_id, None)
+            return
+
+        # النظام القديم للخدمات اليدوية يبقى كما هو.
         parts = text_val.split(':')
         if len(parts) >= 2:
             custom_label = parts[0].strip()
             price = float(parts[1].strip())
-            category_val = temp_add_service.get(chat_id, {}).get('category')
-            manual_type = temp_add_service.get(chat_id, {}).get('manual_type', 'subscription')
+            category_val = srv.get('category')
+            subcat_val = srv.get('subcat')
+
             if not custom_label or price <= 0:
                 raise ValueError("بيانات غير صحيحة")
+
             if manual_type == 'quantity':
                 if not custom_label.isdigit() or int(custom_label) <= 0:
                     raise ValueError("الكمية يجب أن تكون رقمًا صحيحًا")
         else:
             raise ValueError("صيغة غير صحيحة")
-            
+
         key = f"custom_srv_{int(time.time())}"
-        subcat_val = srv.get('subcat')
-        category_val = srv.get('category')
 
         service_payload = {
-            'name': f"{srv['name']} ({custom_label})", 
+            'name': f"{srv['name']} ({custom_label})",
             'btn_label': f"{custom_label} ({price} ن)",
-            'service_id': 0, 
+            'service_id': 0,
             'category': category_val,
             'subcat': subcat_val,
-            'msg': srv.get('msg', '🎮 **أرسل المعلومات أو الآيدي المطلوب:**'), 
+            'msg': srv.get(
+                'msg',
+                '🎮 **أرسل المعلومات أو الآيدي المطلوب:**'
+            ),
             'price': price,
             'qty': 1,
             'is_custom_tiers': False
         }
-        
+
         SERVICES[key] = service_payload
-        
+
         try:
             supabase.table("custom_services").upsert({
                 "service_key": key,
                 "category": category_val,
                 "subcat": subcat_val,
-                "service_data": json.dumps(service_payload, ensure_ascii=False)
+                "service_data": json.dumps(
+                    service_payload,
+                    ensure_ascii=False
+                )
             }, on_conflict="service_key").execute()
         except Exception as db_err:
-            print(f"Error saving manual service to Supabase: {db_err}")
-        
-        option_title = 'الكمية' if manual_type == 'quantity' else 'اسم الاشتراك'
-        bot.send_message(chat_id, f"✅ **تمت إضافة وحفظ الخدمة اليدوية بنجاح!**\n🏷️ {option_title}: `{custom_label}`\n💰 السعر: `{price}` نقطة", parse_mode="Markdown")
-        del temp_add_service[chat_id]
+            print(
+                f"Error saving manual service to Supabase: {db_err}"
+            )
+
+        option_title = (
+            'الكمية'
+            if manual_type == 'quantity'
+            else 'اسم الاشتراك'
+        )
+
+        bot.send_message(
+            chat_id,
+            "✅ **تمت إضافة وحفظ الخدمة اليدوية بنجاح!**\n"
+            f"🏷️ {option_title}: `{custom_label}`\n"
+            f"💰 السعر: `{price}` نقطة",
+            parse_mode="Markdown"
+        )
+
+        temp_add_service.pop(chat_id, None)
+
     except Exception as e:
+        print(f"Manual/financing service save error: {e}")
+
         markup_back = types.InlineKeyboardMarkup()
-        markup_back.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data='adm_manage_services', style=get_item_style('adm_manage_services')))
-        fmt = "`الكمية:السعر`" if temp_add_service.get(chat_id, {}).get('manual_type') == 'quantity' else "`اسم الاشتراك:السعر`"
-        msg = bot.send_message(chat_id, f"⚠️ الصيغة غير صحيحة. أرسل بالشكل المطلوب: {fmt}", reply_markup=markup_back)
-        bot.register_next_step_handler(msg, step_manual_srv_save_final)
+        markup_back.add(
+            types.InlineKeyboardButton(
+                "🔙 إلغاء",
+                callback_data='adm_manage_services',
+                style=get_item_style('adm_manage_services')
+            )
+        )
+
+        if manual_type == 'financing':
+            fmt = (
+                "`1000:6`\n"
+                "`2000 بنات فقط:12`\n"
+                "`3000:18`"
+            )
+        elif manual_type == 'quantity':
+            fmt = "`الكمية:السعر`"
+        else:
+            fmt = "`اسم الاشتراك:السعر`"
+
+        msg = bot.send_message(
+            chat_id,
+            "⚠️ **الصيغة غير صحيحة.**\n\n"
+            "الصيغة المطلوبة:\n"
+            f"{fmt}\n\n"
+            f"الخطأ: `{str(e)[:120]}`",
+            reply_markup=markup_back,
+            parse_mode="Markdown"
+        )
+        bot.register_next_step_handler(
+            msg,
+            step_manual_srv_save_final
+        )
 
 def process_update_single_price(message, service_key):
     try:
