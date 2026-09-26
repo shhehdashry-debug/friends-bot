@@ -1152,6 +1152,11 @@ def _all_service_parent_targets():
             return
         if key in {"main", "our_services"}:
             return
+        # الأزرار المخصصة (تمويل، معلومات البوت، ...) لها قائمتها الخاصة
+        # عند فتحها من الواجهة الرئيسية مباشرة. أي خدمة أو قسم فرعي يُضاف
+        # داخلها يجب أن يبقى محصوراً هناك فقط ولا يتكرر داخل "خدماتنا".
+        if key.startswith("custom:"):
+            return
         if len(key.encode("utf-8")) > 45:
             return
         seen.add(key)
@@ -1161,14 +1166,9 @@ def _all_service_parent_targets():
     for key,title in CATEGORIES.items():
         add(key,title)
 
-    # الأزرار المخصصة
-    try:
-        for item in _load_custom_link_buttons():
-            item_id=str(item.get("id","")).strip()
-            if item_id and not item.get("hidden",False):
-                add(f"custom:{item_id}", item.get("name","زر مخصص"))
-    except Exception:
-        pass
+    # ملاحظة: الأزرار المخصصة (custom:) مستثناة بالكامل من هذه القائمة
+    # (راجع فلتر "custom:" داخل add() أعلاه) لأن لها قائمة عرض خاصة بها
+    # تُفتح مباشرة من الواجهة الرئيسية، ولا يجب أن تتكرر داخل "خدماتنا".
 
     # الأقسام الفرعية الموجودة نفسها يمكن أن تكون آباء لأقسام/خدمات أخرى
     for key in SUB_CATEGORIES.keys():
@@ -5094,6 +5094,7 @@ def query(call):
             if not check_sub(chat_id) and chat_id != ADMIN_ID:
                 bot.send_message(chat_id, "❌ لم تشترك في القناة المطلوب الاشتراك فيها!")
                 return
+            NAV_CURRENT[chat_id] = "start"
             main_menu(chat_id, message_id)
             return
 
@@ -7212,6 +7213,7 @@ def handle_commands(message):
             except Exception as e:
                 print(f"Error checking subscription: {e}")
 
+        NAV_CURRENT[chat_id] = "start"
         main_menu(chat_id, user_data=start_user_data)
 
     elif text.startswith('/admin') and chat_id == ADMIN_ID:
