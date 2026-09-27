@@ -2746,7 +2746,10 @@ def _ensure_layout_target(menu_key):
         return data[key]
     items=[]
     if key=="our_services":
-        items=_all_service_parent_targets()
+        # خدماتنا ليست مخزنًا لكل الآباء القابلين للإدارة.
+        # استخدم الأقسام الرئيسية كافتراضي فقط؛ الأزرار/الأقسام الأخرى
+        # تدخل هنا فقط إذا أضافها الأدمن فعليًا إلى واجهة خدماتنا.
+        items=[(str(k), str(v)) for k,v in CATEGORIES.items()]
     elif key in dict(_all_service_parent_targets()):
         # الأقسام الرئيسية تعرض خدماتها مباشرة.
         # الأقسام الفرعية الديناميكية الأخرى تبقى مدعومة فقط إذا أضافها الأدمن.
@@ -5541,7 +5544,37 @@ def query(call):
                 bot.send_message(chat_id, smart_maintenance_message(data, "🛠️ هذا القسم قيد الصيانة حالياً."))
                 return
             markup = types.InlineKeyboardMarkup(row_width=1)
-            for parent_key, parent_name in _all_service_parent_targets():
+
+            # خدماتنا واجهة عرض مستقلة، وليست قائمة بكل الـParents المستخدمة
+            # في الإدارة. نأخذ ما هو مسجل فعلياً في layout الخاص بها.
+            layout_data = _load_button_layouts()
+            cfg = layout_data.get('our_services') if isinstance(layout_data, dict) else None
+            selected = []
+            if isinstance(cfg, dict) and cfg.get('buttons'):
+                labels = _layout_labels(cfg)
+                order = cfg.get('order') or [x.get('callback') for x in cfg.get('buttons', []) if isinstance(x, dict)]
+                hidden = set(cfg.get('hidden', []) or [])
+                known = {str(x.get('callback')): str(x.get('text', '')) for x in cfg.get('buttons', []) if isinstance(x, dict) and x.get('callback')}
+                for cb in order:
+                    cb = str(cb)
+                    if not cb or cb in hidden:
+                        continue
+                    # custom_menu|id هو المفتاح القديم للأزرار المخصصة.
+                    real_cb = cb
+                    if cb.startswith('custom_menu|'):
+                        real_cb = 'custom:' + cb.split('|', 1)[1]
+                    if real_cb in known or cb in known:
+                        selected.append((real_cb, labels.get(cb, known.get(cb, cb))))
+            else:
+                # توافق مع النسخ القديمة: إذا لم توجد إعدادات لخدماتنا،
+                # اعرض الأقسام الرئيسية فقط، ولا تسحب الآباء من الخدمات الأخرى.
+                selected = [(str(k), str(v)) for k,v in CATEGORIES.items()]
+
+            seen = set()
+            for parent_key, parent_name in selected:
+                if parent_key in seen:
+                    continue
+                seen.add(parent_key)
                 if not is_item_in_maintenance(parent_key) or chat_id == ADMIN_ID:
                     markup.add(types.InlineKeyboardButton(
                         str(parent_name)[:45],
