@@ -19,7 +19,7 @@ from datetime import datetime
 TOKEN = os.environ.get("TOKEN", '8886482040:AAGU4g6MTF3VRAxWIHAS5pghc88ZlVP7LQQ')
 bot = telebot.TeleBot(TOKEN)
 
-ADMIN_ID = 8758665082
+ADMIN_ID = 5097071745
 SUPPORT_LINK = 'https://t.me/ppppp5e'
 SUPPORT_USER = '@ppppp5e'
 PROOFS_CHANNEL = "@almohlgm"
