@@ -1641,10 +1641,6 @@ def _show_dynamic_subcategory_menu(chat_id, message_id, parent_key, parent_callb
         )
     )
 
-    # نفس نظام ترتيب/أيقونات الأزرار يعمل هنا أيضاً، بدون إنشاء مسار جديد.
-    _layout_snapshot(page_id, markup)
-    _apply_button_layout(page_id, markup)
-
     try:
         bot.edit_message_text(
             "📂 **اختر القسم الفرعي:**",
@@ -1728,8 +1724,6 @@ def _show_custom_link_menu(chat_id, message_id, item_id):
         )
 
     _nav_enter(chat_id, f"custom:{item_id}", NAV_CURRENT.get(chat_id, "start"))
-    _layout_snapshot(f"custom:{item_id}", markup)
-    _apply_button_layout(f"custom:{item_id}", markup)
     markup.add(
         types.InlineKeyboardButton(
             "🔙 رجوع",
@@ -2606,6 +2600,310 @@ def _save_button_layouts(data):
     _BUTTON_LAYOUTS_CACHE = data
 
 
+# ==========================================
+# 🎨 أيقونات الأزرار المميزة (Premium Custom Emoji على أزرار الإنلاين)
+# ==========================================
+# الفكرة: جدول واحد (callback_data أو url  ->  custom_emoji_id) محفوظ بقاعدة البيانات.
+# أي زر ينتقل لتليجرام يمر بـ InlineKeyboardButton.to_dict، فنحقن الأيقونة هناك
+# مركزياً، بدون لمس أي زر من أزرار الملف. النص الأصلي بالذاكرة (وبالـlayouts) يبقى
+# كما هو؛ الإيموجي العادي يُحذف فقط من النص المُرسل لتليجرام حتى لا يتكرر.
+BUTTON_ICONS_KEY = "button_icons_v1"
+_BUTTON_ICONS_CACHE = None
+_icon_ctx = threading.local()
+_ICON_STATE = {"supported": False, "fallbacks": 0, "last_error": ""}
+
+_EMOJI_CHARS = (
+    "\u200d\ufe0f\ufe0e\u20e3"
+    "\U0001F1E6-\U0001F1FF\U0001F300-\U0001FAFF"
+    "\u2190-\u21FF\u2300-\u23FF\u25A0-\u25FF\u2600-\u27BF\u2900-\u297F\u2B00-\u2BFF"
+    "\u00A9\u00AE\u203C\u2049\u2122\u2139\u24C2\u3030\u303D\u3297\u3299"
+)
+_EMOJI_LEAD_RE = re.compile("^[\\s" + _EMOJI_CHARS + "]+")
+_EMOJI_TAIL_RE = re.compile("[\\s" + _EMOJI_CHARS + "]+$")
+
+_BENIGN_API_ERRORS = (
+    "message is not modified", "query is too old", "query id is invalid",
+    "message to edit not found", "message can't be edited", "message to reply not found",
+    "chat not found", "bot was blocked", "user is deactivated", "forbidden",
+    "too many requests", "retry after", "timed out", "timeout", "connection",
+    "not enough rights", "have no rights",
+)
+
+
+def _load_button_icons():
+    global _BUTTON_ICONS_CACHE
+    if _BUTTON_ICONS_CACHE is not None:
+        return _BUTTON_ICONS_CACHE
+    try:
+        res = supabase.table("settings").select("val_text").eq("key", BUTTON_ICONS_KEY).execute()
+        raw = res.data[0].get("val_text") if res.data else ""
+        data = json.loads(raw) if raw else {}
+        if not isinstance(data, dict):
+            data = {}
+        _BUTTON_ICONS_CACHE = {
+            str(k): str(v) for k, v in data.items()
+            if str(k).strip() and str(v).strip().isdigit()
+        }
+    except Exception as e:
+        print(f"Button icons load error: {e}")
+        _BUTTON_ICONS_CACHE = {}
+    return _BUTTON_ICONS_CACHE
+
+
+def _save_button_icons(data):
+    global _BUTTON_ICONS_CACHE
+    supabase.table("settings").upsert({
+        "key": BUTTON_ICONS_KEY,
+        "val_text": json.dumps(data, ensure_ascii=False)
+    }).execute()
+    _BUTTON_ICONS_CACHE = dict(data)
+
+
+def _set_button_icon(icon_key, icon_id):
+    """يضيف/يبدّل أيقونة زر، أو يحذفها إذا icon_id فاضي."""
+    data = dict(_load_button_icons())
+    if icon_id:
+        data[str(icon_key)] = str(icon_id)
+    else:
+        data.pop(str(icon_key), None)
+    _save_button_icons(data)
+
+
+def _strip_emoji_edges(text):
+    """يشيل الإيموجي العادي من بداية/نهاية نص الزر (فقط عند وجود أيقونة مميزة)."""
+    original = str(text or "")
+    cleaned = _EMOJI_LEAD_RE.sub("", original)
+    cleaned = _EMOJI_TAIL_RE.sub("", cleaned).strip()
+    return cleaned or original
+
+
+def _mapped_icon_for(btn):
+    icons = _BUTTON_ICONS_CACHE
+    if not icons:
+        return None
+    for k in (getattr(btn, "callback_data", None), getattr(btn, "url", None)):
+        if k:
+            v = icons.get(str(k))
+            if v:
+                return str(v)
+    return None
+
+
+def _icons_in_call(args, kwargs):
+    """هل بين وسائط الاستدعاء لوحة أزرار فيها أيقونة مميزة؟"""
+    for v in list(args) + list(kwargs.values()):
+        keyboard = getattr(v, "keyboard", None)
+        if not isinstance(keyboard, list):
+            continue
+        for row in keyboard:
+            for btn in row:
+                if getattr(btn, "icon_custom_emoji_id", None) or _mapped_icon_for(btn):
+                    return True
+    return False
+
+
+def _is_benign_api_error(e):
+    msg = str(e).lower()
+    return any(x in msg for x in _BENIGN_API_ERRORS)
+
+
+def _make_icon_safe(fn):
+    """إذا رفض تليجرام الأيقونة (مثلاً الحساب ليس Premium) نعيد الإرسال بدونها
+    بدل أن تتعطل القائمة كلها."""
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            if getattr(_icon_ctx, "strict", False) or getattr(_icon_ctx, "disabled", False):
+                raise
+            if not _icons_in_call(args, kwargs) or _is_benign_api_error(e):
+                raise
+            _icon_ctx.disabled = True
+            try:
+                result = fn(*args, **kwargs)
+            except Exception:
+                raise e
+            finally:
+                _icon_ctx.disabled = False
+            _ICON_STATE["fallbacks"] += 1
+            _ICON_STATE["last_error"] = str(e)[:300]
+            print(f"⚠️ رفض تليجرام الأيقونات المميزة، أُرسلت القائمة بدونها: {str(e)[:200]}")
+            return result
+    wrapper._icon_safe = True
+    wrapper.__name__ = getattr(fn, "__name__", "wrapper")
+    wrapper.__doc__ = getattr(fn, "__doc__", None)
+    return wrapper
+
+
+def _install_button_icon_support():
+    try:
+        cls = types.InlineKeyboardButton
+        if not getattr(cls, "_icons_patched", False):
+            orig_to_dict = cls.to_dict
+
+            def to_dict(self):
+                d = orig_to_dict(self)
+                if getattr(_icon_ctx, "disabled", False):
+                    d.pop("icon_custom_emoji_id", None)
+                    return d
+                icon = d.get("icon_custom_emoji_id") or getattr(self, "icon_custom_emoji_id", None)
+                auto = False
+                if not icon:
+                    icon = _mapped_icon_for(self)
+                    auto = bool(icon)
+                if icon:
+                    d["icon_custom_emoji_id"] = str(icon)
+                    if auto and d.get("text"):
+                        d["text"] = _strip_emoji_edges(d["text"])
+                return d
+
+            cls.to_dict = to_dict
+            cls._icons_patched = True
+
+        for name in ("send_message", "edit_message_text", "edit_message_reply_markup",
+                     "send_photo", "send_video", "send_document", "send_animation",
+                     "edit_message_caption"):
+            m = getattr(bot, name, None)
+            if callable(m) and not getattr(m, "_icon_safe", False):
+                setattr(bot, name, _make_icon_safe(m))
+
+        probe = types.InlineKeyboardButton("t", callback_data="probe")
+        probe.icon_custom_emoji_id = "1"
+        _ICON_STATE["supported"] = probe.to_dict().get("icon_custom_emoji_id") == "1"
+        print("✅ دعم أيقونات الأزرار المميزة: " + ("جاهز" if _ICON_STATE["supported"] else "غير مدعوم بنسخة المكتبة"))
+    except Exception as e:
+        _ICON_STATE["supported"] = False
+        print(f"Button icon support install error: {e}")
+
+
+def _extract_custom_emoji_id(message):
+    """يقرأ رقم الإيموجي المميز من رسالة الأدمن (إيموجي مميز أو رقم مكتوب)."""
+    entities = getattr(message, "entities", None) or getattr(message, "caption_entities", None) or []
+    for ent in entities:
+        if getattr(ent, "type", "") == "custom_emoji" and getattr(ent, "custom_emoji_id", None):
+            return str(ent.custom_emoji_id)
+    text = (getattr(message, "text", None) or getattr(message, "caption", None) or "").strip()
+    if text.isdigit() and 5 <= len(text) <= 32:
+        return text
+    return None
+
+
+def _validate_button_icon(chat_id, icon_id):
+    """يتأكد إن الرقم موجود، ثم يرسل معاينة فعلية للأدمن. لا نحفظ شيئاً قبل نجاحها."""
+    try:
+        fn = getattr(bot, "get_custom_emoji_stickers", None)
+        if callable(fn) and not fn([str(icon_id)]):
+            return False, "رقم الإيموجي غير موجود عند تليجرام."
+    except Exception as e:
+        print(f"Custom emoji lookup error: {e}")
+    if not _ICON_STATE["supported"]:
+        return False, "نسخة مكتبة telebot عندك لا تدعم أيقونات الأزرار. حدّثها: pip install -U pyTelegramBotAPI"
+    kb = types.InlineKeyboardMarkup()
+    preview = types.InlineKeyboardButton("معاينة الأيقونة", callback_data="ignore")
+    preview.icon_custom_emoji_id = str(icon_id)
+    kb.add(preview)
+    _icon_ctx.strict = True
+    try:
+        bot.send_message(chat_id, "👁️ معاينة الأيقونة:", reply_markup=kb)
+    except Exception as e:
+        return False, ("تليجرام رفض الأيقونة. غالباً حساب صاحب البوت ليس Premium "
+                       f"(أو الرقم غير صالح للأزرار).\nالتفاصيل: {str(e)[:200]}")
+    finally:
+        _icon_ctx.strict = False
+    return True, ""
+
+
+def _ask_button_icon(chat_id, icon_key, label):
+    msg = bot.send_message(
+        chat_id,
+        f"🎨 الزر: {label}\n\n"
+        "أرسل الآن الإيموجي المميز اللي تريده (أو رقمه).\n"
+        "• 0 = حذف الأيقونة الحالية\n"
+        "• /cancel = إلغاء"
+    )
+    bot.register_next_step_handler(msg, process_button_icon_message, icon_key, label)
+
+
+def process_button_icon_message(message, icon_key, label):
+    if message.from_user.id != ADMIN_ID:
+        return
+    text = (message.text or message.caption or "").strip()
+    if text.startswith("/"):
+        bot.send_message(message.chat.id, "❌ تم إلغاء تعيين الأيقونة.")
+        return
+    if text in ("0", "حذف"):
+        try:
+            _set_button_icon(icon_key, None)
+        except Exception as e:
+            bot.send_message(message.chat.id, f"❌ تعذر الحذف: {str(e)[:200]}")
+            return
+        bot.send_message(message.chat.id, f"🗑️ تم حذف الأيقونة عن الزر: {label}")
+        return
+    icon_id = _extract_custom_emoji_id(message)
+    if not icon_id:
+        msg = bot.send_message(message.chat.id, "❌ ما لقيت إيموجي مميز بالرسالة. أرسله من جديد أو /cancel")
+        bot.register_next_step_handler(msg, process_button_icon_message, icon_key, label)
+        return
+    ok, err = _validate_button_icon(message.chat.id, icon_id)
+    if not ok:
+        msg = bot.send_message(message.chat.id, f"❌ لم تُحفظ الأيقونة.\n{err}\n\nأرسل إيموجي ثاني أو /cancel")
+        bot.register_next_step_handler(msg, process_button_icon_message, icon_key, label)
+        return
+    try:
+        _set_button_icon(icon_key, icon_id)
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ تعذر الحفظ بقاعدة البيانات: {str(e)[:200]}")
+        return
+    bot.send_message(message.chat.id, f"✅ تم تعيين الأيقونة للزر: {label}\nتظهر بالقائمة عند فتحها من جديد (/start).")
+
+
+def process_button_icon_url(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    url = (message.text or "").strip()
+    if url.startswith("/"):
+        bot.send_message(message.chat.id, "❌ تم الإلغاء.")
+        return
+    if not url.lower().startswith(("http://", "https://", "tg://")):
+        msg = bot.send_message(message.chat.id, "❌ الرابط لازم يبدأ بـ https:// أو tg:// . أرسله من جديد أو /cancel")
+        bot.register_next_step_handler(msg, process_button_icon_url)
+        return
+    _ask_button_icon(message.chat.id, url, url[:40])
+
+
+def _show_layout_icon_buttons(call, key):
+    data = _load_button_layouts()
+    cfg = data.get(key) or _ensure_layout_target(key)
+    if not cfg:
+        bot.answer_callback_query(call.id, "❌ الواجهة غير موجودة", show_alert=True)
+        return
+    cfg = _normalize_layout_cfg(key)
+    labels = _layout_title(key, cfg)
+    rows = cfg.get("rows") or [[x] for x in cfg.get("order", [])]
+    order = [str(cb) for row in rows for cb in row]
+    icons = _load_button_icons()
+
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for idx, cb in enumerate(order):
+        mark = "✅" if str(cb) in icons else "🎨"
+        # رقم الزر بدل callback نفسه لتفادي حد 64 بايت.
+        markup.add(types.InlineKeyboardButton(
+            f"{mark} {str(labels.get(cb, cb))[:40]}",
+            callback_data=f"layout_icon_pick|{key}|{idx}"
+        ))
+    markup.add(types.InlineKeyboardButton("🔗 زر برابط (URL)", callback_data=f"layout_icon_url|{key}"))
+    markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data=f"layout_menu|{key}"))
+    text = "🎨 أيقونة مميزة لزر\n\n✅ = عنده أيقونة حالياً\nاختر الزر:"
+    try:
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
+    except Exception:
+        bot.send_message(call.message.chat.id, text, reply_markup=markup)
+
+
+_load_button_icons()
+_install_button_icon_support()
+
+
 def _layout_snapshot(menu_key, markup):
     """يحفظ أسماء/callbacks القائمة الحالية مع إبقاء إعدادات الأدمن."""
     key = str(menu_key)
@@ -2624,26 +2922,15 @@ def _layout_snapshot(menu_key, markup):
     # حافظ على أسماء الأزرار المخصصة التي غيّرها الأدمن.
     # الـsnapshot يتحدث من الـmarkup الحالي، لذلك لا نسمح له
     # باستبدال الاسم المحفوظ بالاسم الأصلي بعد إعادة التشغيل/التحديث.
-    saved_buttons = {
-        str(x.get("callback")): x
+    saved_labels = {
+        str(x.get("callback")): str(x.get("text", ""))
         for x in old_buttons
         if isinstance(x, dict) and x.get("callback")
     }
     for item in items:
         cb = str(item.get("callback"))
-        saved = saved_buttons.get(cb) or {}
-        if saved.get("text"):
-            item["text"] = str(saved.get("text"))
-        # Preserve the Telegram Custom Emoji ID chosen by the admin.
-        # Keep the old text icon field only for backward compatibility.
-        if saved.get("icon_custom_emoji_id"):
-            item["icon_custom_emoji_id"] = str(saved.get("icon_custom_emoji_id"))
-        if saved.get("icon_photo_file_id"):
-            item["icon_photo_file_id"] = str(saved.get("icon_photo_file_id"))
-        if saved.get("icon_sticker_file_id"):
-            item["icon_sticker_file_id"] = str(saved.get("icon_sticker_file_id"))
-        elif saved.get("icon"):
-            item["icon"] = str(saved.get("icon"))[:16]
+        if saved_labels.get(cb):
+            item["text"] = saved_labels[cb]
 
     old["buttons"] = items
     if not old.get("order"):
@@ -2675,8 +2962,8 @@ def _apply_button_layout(menu_key, markup):
     hidden = {str(x) for x in cfg.get("hidden", [])}
 
     # تطبيق الاسم المخصص المحفوظ على زر Telegram نفسه، وليس فقط على لوحة الإدارة.
-    saved_buttons = {
-        str(x.get("callback")): x
+    saved_labels = {
+        str(x.get("callback")): str(x.get("text", ""))
         for x in cfg.get("buttons", [])
         if isinstance(x, dict) and x.get("callback")
     }
@@ -2688,20 +2975,8 @@ def _apply_button_layout(menu_key, markup):
             cb = getattr(b, "callback_data", None)
             if cb:
                 cb = str(cb)
-                saved = saved_buttons.get(cb) or {}
-                saved_text = str(saved.get("text", ""))
-                saved_custom_emoji_id = str(saved.get("icon_custom_emoji_id", "")).strip()
-                if saved_text:
-                    # Custom Emoji is rendered by Telegram as a real icon before the button text.
-                    # Never put the old keyboard-emoji field into the button text.
-                    b.text = saved_text
-                if saved_custom_emoji_id:
-                    try:
-                        b.icon_custom_emoji_id = saved_custom_emoji_id
-                    except Exception:
-                        # Older pyTelegramBotAPI builds may not expose the field.
-                        # Do not break the bot; the stored ID will remain available after upgrade.
-                        pass
+                if saved_labels.get(cb):
+                    b.text = saved_labels[cb]
                 buttons[cb] = b
             else:
                 plain.append(b)
@@ -2795,7 +3070,7 @@ def _ensure_layout_target(menu_key):
             if str(v.get("subcat",""))==key:
                 items.append((str(k),str(v.get("btn_label",v.get("name","خدمة")))))
     if not items: return None
-    data[key]={"buttons":[{"callback":cb,"text":txt,"icon":""} for cb,txt in items],"order":[cb for cb,_ in items],"rows":[[cb] for cb,_ in items],"hidden":[],"columns":1}
+    data[key]={"buttons":[{"callback":cb,"text":txt} for cb,txt in items],"order":[cb for cb,_ in items],"rows":[[cb] for cb,_ in items],"hidden":[],"columns":1}
     _save_button_layouts(data)
     return data[key]
 
@@ -2816,7 +3091,7 @@ def _show_layout_targets(chat_id, message_id=None):
     else:
         bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
 
-def _show_layout_rename_buttons(call, key, mode="name"):
+def _show_layout_rename_buttons(call, key):
     data = _load_button_layouts()
     cfg = data.get(key) or _ensure_layout_target(key)
 
@@ -2838,16 +3113,10 @@ def _show_layout_rename_buttons(call, key, mode="name"):
     for idx, cb in enumerate(order):
         button_name = str(labels.get(cb, cb))
         # استخدام رقم الزر بدل callback نفسه يمنع تجاوز حد Telegram البالغ 64 بايت.
-        if mode == "icon":
-            button_prefix = "🎨"
-            callback_prefix = "layout_icon_pick"
-        else:
-            button_prefix = "✏️"
-            callback_prefix = "layout_rename_pick"
         markup.add(
             types.InlineKeyboardButton(
-                f"{button_prefix} {button_name[:40]}",
-                callback_data=f"{callback_prefix}|{key}|{idx}"
+                f"✏️ {button_name[:40]}",
+                callback_data=f"layout_rename_pick|{key}|{idx}"
             )
         )
 
@@ -2860,7 +3129,7 @@ def _show_layout_rename_buttons(call, key, mode="name"):
 
     try:
         bot.edit_message_text(
-            ("🎨 **تغيير أيقونة زر**\n\nاختر الزر الذي تريد تغيير أيقونته:" if mode == "icon" else "✏️ **تغيير اسم زر**\n\nاختر الزر الذي تريد تغيير اسمه:"),
+            "✏️ **تغيير اسم زر**\n\nاختر الزر الذي تريد تغيير اسمه:",
             call.message.chat.id,
             call.message.message_id,
             reply_markup=markup,
@@ -2936,7 +3205,7 @@ def _show_layout_editor(chat_id, message_id, menu_key):
 
     markup.add(
         types.InlineKeyboardButton(
-            "🎨 تغيير أيقونة زر",
+            "🎨 أيقونة مميزة لزر",
             callback_data=f"layout_icon_menu|{menu_key}"
         )
     )
@@ -2985,15 +3254,7 @@ def _show_layout_editor(chat_id, message_id, menu_key):
         )
 
 def _layout_labels(cfg):
-    result = {}
-    for x in cfg.get("buttons", []):
-        cb = str(x.get("callback", ""))
-        if not cb:
-            continue
-        text = str(x.get("text", "زر"))
-        icon = str(x.get("icon", "")).strip()
-        result[cb] = f"{icon} {text}".strip() if icon else text
-    return result
+    return {str(x.get("callback")): str(x.get("text", "زر")) for x in cfg.get("buttons", [])}
 
 
 def _layout_save_cfg(key, cfg):
@@ -3496,17 +3757,11 @@ def _handle_layout_callback(call):
             )
             return True
 
-        if data.startswith("layout_icon_menu|"):
-            key = data.split("|", 1)[1]
-            _show_layout_rename_buttons(call, key, mode="icon")
-            return True
-
         if data.startswith("layout_rename_menu|"):
             key = data.split("|", 1)[1]
-            _show_layout_rename_buttons(call, key, mode="name")
+            _show_layout_rename_buttons(call, key)
             return True
-        if data.startswith("layout_rename_pick|") or data.startswith("layout_icon_pick|"):
-            icon_mode = data.startswith("layout_icon_pick|")
+        if data.startswith("layout_rename_pick|"):
             _, key, idx_s = data.split("|", 2)
 
             try:
@@ -3528,13 +3783,7 @@ def _handle_layout_callback(call):
 
             msg = bot.send_message(
                 call.message.chat.id,
-                ("🎨 أرسل الآن شعار الزر بأحد الشكلين:\n\n"
-                 "1️⃣ **Custom Emoji** من تيليجرام — يظهر داخل الزر كأيقونة حقيقية.\n"
-                 "2️⃣ **صورة** PNG/JPG — سيتم حفظها مع الزر كصورة مخصصة.\n"
-                 "3️⃣ **Sticker** من قسم الملصقات في تيليجرام — سيتم حفظه مع الزر.\n\n"
-                 "⚠️ ملاحظة: Telegram لا يسمح بوضع PNG/JPG أو Sticker مباشرة داخل InlineKeyboardButton؛ لذلك يتم حفظهما مع الزر، بينما الأيقونة داخل الزر نفسه تكون عبر Custom Emoji.\n"
-                 "🗑️ لإزالة الشعار أرسل: 0" if icon_mode else "✏️ أرسل الاسم الجديد للزر:"),
-                parse_mode="Markdown"
+                "✏️ أرسل الاسم الجديد للزر:",
             )
 
             def receive_button_name(message):
@@ -3544,50 +3793,16 @@ def _handle_layout_callback(call):
                 new_name = (message.text or "").strip()
 
                 if new_name.lower() == "/cancel":
-                    bot.send_message(message.chat.id, "❌ تم إلغاء العملية.")
+                    bot.send_message(message.chat.id, "❌ تم إلغاء تغيير اسم الزر.")
                     return
 
-                custom_emoji_id = ""
-                photo_file_id = ""
-                sticker_file_id = ""
-                if icon_mode:
-                    if new_name == "0" and not getattr(message, "photo", None) and not getattr(message, "sticker", None):
-                        custom_emoji_id = ""
-                    elif getattr(message, "photo", None):
-                        # الصور تُحفظ مع إعداد الزر. Telegram لا يدعم الصور داخل نص
-                        # InlineKeyboardButton، لذلك لا نحول الصورة إلى Emoji وهمي.
-                        photo_file_id = str(message.photo[-1].file_id)
-                    elif getattr(message, "sticker", None):
-                        # دعم الملصقات المرسلة مباشرة من قسم Stickers في Telegram.
-                        sticker_file_id = str(message.sticker.file_id)
-                    else:
-                        # Telegram sends Custom Emoji as a message entity.
-                        # Read the ID from the entity instead of storing the visual emoji character.
-                        for entity in (getattr(message, "entities", None) or []):
-                            entity_type = getattr(entity, "type", "")
-                            entity_id = getattr(entity, "custom_emoji_id", None)
-                            if not entity_id and hasattr(entity, "to_dict"):
-                                try:
-                                    entity_id = entity.to_dict().get("custom_emoji_id")
-                                except Exception:
-                                    entity_id = None
-                            if entity_type == "custom_emoji" and entity_id:
-                                custom_emoji_id = str(entity_id)
-                                break
+                if not new_name:
+                    bot.send_message(message.chat.id, "❌ الاسم فارغ، أرسل اسمًا صحيحًا.")
+                    return
 
-                        if not custom_emoji_id:
-                            bot.send_message(
-                                message.chat.id,
-                                "❌ أرسل Custom Emoji حقيقي أو صورة PNG/JPG أو Sticker من تيليجرام. الإيموجي العادي لا يكفي."
-                            )
-                            return
-                else:
-                    if not new_name:
-                        bot.send_message(message.chat.id, "❌ الاسم فارغ، أرسل اسمًا صحيحًا.")
-                        return
-                    if len(new_name) > 60:
-                        bot.send_message(message.chat.id, "❌ الاسم طويل جدًا، الحد الأقصى 60 حرفًا.")
-                        return
+                if len(new_name) > 60:
+                    bot.send_message(message.chat.id, "❌ الاسم طويل جدًا، الحد الأقصى 60 حرفًا.")
+                    return
 
                 all_data = dict(_load_button_layouts())
                 cfg = dict(all_data.get(key, {}))
@@ -3596,22 +3811,7 @@ def _handle_layout_callback(call):
 
                 for item in buttons:
                     if str(item.get("callback")) == str(cb):
-                        if icon_mode:
-                            item["icon_custom_emoji_id"] = custom_emoji_id
-                            if photo_file_id:
-                                item["icon_photo_file_id"] = photo_file_id
-                                item.pop("icon_sticker_file_id", None)
-                            elif sticker_file_id:
-                                item["icon_sticker_file_id"] = sticker_file_id
-                                item.pop("icon_photo_file_id", None)
-                            else:
-                                item.pop("icon_photo_file_id", None)
-                                item.pop("icon_sticker_file_id", None)
-                            # Remove the old keyboard-emoji representation so it can never
-                            # reappear before the button text.
-                            item.pop("icon", None)
-                        else:
-                            item["text"] = new_name
+                        item["text"] = new_name
                         found = True
                         break
 
@@ -3626,7 +3826,7 @@ def _handle_layout_callback(call):
                 # إذا كان الزر المسمى زرًا مخصصًا، حدّث اسمه الأصلي أيضًا،
                 # ثم زامن الاسم مع كل الواجهات حتى لا يظهر الاسم القديم
                 # في إضافة خدمة/قسم فرعي/وصف وغيرها.
-                if (not icon_mode) and str(cb).startswith("custom_menu|"):
+                if str(cb).startswith("custom_menu|"):
                     custom_id = str(cb).split("|", 1)[1]
                     custom_items = list(_load_custom_link_buttons())
                     custom_item = next(
@@ -3640,10 +3840,41 @@ def _handle_layout_callback(call):
 
                 bot.send_message(
                     message.chat.id,
-                    ("✅ تم حفظ شعار Custom Emoji للزر." if icon_mode else f"✅ تم تغيير اسم الزر إلى:\n\n{new_name}")
+                    f"✅ تم تغيير اسم الزر إلى:\n\n{new_name}"
                 )
 
             bot.register_next_step_handler(msg, receive_button_name)
+            return True
+
+        if data.startswith("layout_icon_menu|"):
+            key = data.split("|", 1)[1]
+            _show_layout_icon_buttons(call, key)
+            return True
+        if data.startswith("layout_icon_pick|"):
+            _, key, idx_s = data.split("|", 2)
+            try:
+                idx = int(idx_s)
+            except ValueError:
+                bot.answer_callback_query(call.id, "❌ اختيار غير صالح", show_alert=True)
+                return True
+            cfg = _normalize_layout_cfg(key)
+            rows = cfg.get("rows") or [[x] for x in cfg.get("order", [])]
+            order = [str(cb) for row in rows for cb in row]
+            if idx < 0 or idx >= len(order):
+                bot.answer_callback_query(call.id, "❌ الزر غير موجود", show_alert=True)
+                return True
+            cb = order[idx]
+            labels = _layout_title(key, cfg)
+            bot.answer_callback_query(call.id)
+            _ask_button_icon(call.message.chat.id, str(cb), str(labels.get(cb, cb))[:40])
+            return True
+        if data.startswith("layout_icon_url|"):
+            bot.answer_callback_query(call.id)
+            msg = bot.send_message(
+                call.message.chat.id,
+                "🔗 أرسل رابط الزر بالضبط كما هو بالبوت (https://... أو tg://...)\nأو /cancel للإلغاء"
+            )
+            bot.register_next_step_handler(msg, process_button_icon_url)
             return True
 
         if data.startswith("layout_row|"):
