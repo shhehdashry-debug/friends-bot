@@ -19,7 +19,7 @@ from datetime import datetime
 TOKEN = os.environ.get("TOKEN", '8886482040:AAGU4g6MTF3VRAxWIHAS5pghc88ZlVP7LQQ')
 bot = telebot.TeleBot(TOKEN)
 
-ADMIN_ID = 5097071745
+ADMIN_ID = 8758665082
 SUPPORT_LINK = 'https://t.me/ppppp5e'
 SUPPORT_USER = '@ppppp5e'
 PROOFS_CHANNEL = "@almohlgm"
@@ -699,9 +699,57 @@ def smart_maintenance_message(item_key, default="🛠️ هذه الخدمة ق�
 
 def get_global_advertisement(): return get_ui_setting(UI_AD_KEY, "").strip()
 
+# ===== محتوى الإعلان (نص و/أو صورة) وقنوات النشر =====
+UI_AD_CHANNELS_KEY = "ui_ad_channels_v1"
+
+
+def get_ad_content():
+    """يرجّع (النص, معرّف الصورة) للإعلان المحفوظ حالياً. يدعم الإعلانات القديمة (نص خام فقط)."""
+    raw = get_ui_setting(UI_AD_KEY, "").strip()
+    if not raw:
+        return "", None
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            txt = str(data.get("text") or "")
+            photo = str(data.get("photo") or "") or None
+            return txt, photo
+    except Exception:
+        pass
+    return raw, None  # إعلان قديم محفوظ كنص خام قبل هذا التحديث
+
+
+def save_ad_content(text, photo_file_id):
+    text = (text or "").strip()[:3500]
+    photo_file_id = (photo_file_id or "").strip() or None
+    if not text and not photo_file_id:
+        set_ui_setting(UI_AD_KEY, "")
+        return
+    set_ui_setting(UI_AD_KEY, json.dumps({"text": text, "photo": photo_file_id or ""}, ensure_ascii=False))
+
+
+def get_ad_channels():
+    """يرجّع قائمة قنوات النشر: [{'id':..., 'title':...}, ...]"""
+    try:
+        data = json.loads(get_ui_setting(UI_AD_CHANNELS_KEY, "[]") or "[]")
+        if not isinstance(data, list):
+            return []
+        out = []
+        for x in data:
+            if isinstance(x, dict) and x.get("id") not in (None, ""):
+                out.append({"id": x.get("id"), "title": str(x.get("title") or x.get("id"))})
+        return out
+    except Exception:
+        return []
+
+
+def save_ad_channels(channels):
+    set_ui_setting(UI_AD_CHANNELS_KEY, json.dumps(channels, ensure_ascii=False))
+
 def _admin_ui_tools_menu(chat_id, message_id):
     ps = "مفعل ✅" if show_service_prices() else "معطل ❌"
-    ad = "موجود 📢" if get_global_advertisement() else "غير موجود"
+    ad_text, ad_photo = get_ad_content()
+    ad = "موجود 📢" if (ad_text or ad_photo) else "غير موجود"
     sm = "مخصص ✅" if get_ui_setting(SMART_MAINT_KEY, "").strip() else "افتراضي"
     kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(types.InlineKeyboardButton(f"📢 إدارة الإعلان ({ad})", callback_data="ui_ad_menu"))
@@ -710,14 +758,116 @@ def _admin_ui_tools_menu(chat_id, message_id):
     kb.add(types.InlineKeyboardButton("🔙 لوحة الإدارة", callback_data="admin_panel"))
     bot.edit_message_text("🎛️ **أدوات واجهة البوت**\n\nاختر الميزة:", chat_id, message_id, reply_markup=kb, parse_mode="Markdown")
 
+
+def _show_ui_ad_menu(chat_id, message_id):
+    """يعرض شاشة إدارة الإعلان. نحذف الرسالة القديمة ونرسل من جديد (نص أو صورة)
+    حتى تشتغل صح بغض النظر عن نوع الرسالة السابقة."""
+    text, photo_id = get_ad_content()
+    channels = get_ad_channels()
+    has_ad = bool(text or photo_id)
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("✏️ تغيير نص/صورة الإعلان", callback_data="ui_ad_set"))
+    kb.add(types.InlineKeyboardButton(f"📡 قنوات النشر ({len(channels)})", callback_data="ui_ad_channels_menu"))
+    if has_ad:
+        kb.add(types.InlineKeyboardButton("🚀 نشر الإعلان الآن بالقنوات المحددة", callback_data="ui_ad_publish"))
+        kb.add(types.InlineKeyboardButton("🗑️ حذف الإعلان", callback_data="ui_ad_delete"))
+    kb.add(types.InlineKeyboardButton("🔙 أدوات الواجهة", callback_data="ui_tools_menu"))
+
+    preview = text if text else ("🖼️ (صورة بدون نص)" if photo_id else "لا يوجد إعلان محفوظ.")
+    body = f"📢 **إدارة الإعلان**\n\n{preview}"
+
+    try:
+        bot.delete_message(chat_id, message_id)
+    except Exception:
+        pass
+    if photo_id:
+        bot.send_photo(chat_id, photo_id, caption=body, reply_markup=kb, parse_mode="Markdown")
+    else:
+        bot.send_message(chat_id, body, reply_markup=kb, parse_mode="Markdown")
+
+
+def _show_ad_channels_menu(chat_id, message_id):
+    channels = get_ad_channels()
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    if not channels:
+        kb.add(types.InlineKeyboardButton("لا توجد قنوات محفوظة بعد", callback_data="ignore", style=get_item_style("ignore")))
+    for idx, ch in enumerate(channels):
+        kb.add(types.InlineKeyboardButton(f"🗑️ {ch['title']}", callback_data=f"ui_ad_ch_del|{idx}"))
+    kb.add(types.InlineKeyboardButton("➕ إضافة قناة نشر جديدة", callback_data="ui_ad_ch_add"))
+    kb.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="ui_ad_menu"))
+    text = "📡 **قنوات نشر الإعلان**\n\nاضغط على أي قناة لحذفها من القائمة.\n⚠️ لازم يكون البوت أدمن بأي قناة تضيفها حتى ينشر فيها."
+    try:
+        bot.edit_message_text(text, chat_id, message_id, reply_markup=kb, parse_mode="Markdown")
+    except Exception:
+        bot.send_message(chat_id, text, reply_markup=kb, parse_mode="Markdown")
+
+
+def _publish_ad_now(chat_id):
+    text, photo_id = get_ad_content()
+    channels = get_ad_channels()
+    if not text and not photo_id:
+        return "❌ لا يوجد إعلان محفوظ، أضف نص أو صورة أولاً."
+    if not channels:
+        return "❌ لا توجد قنوات محددة، أضف قناة نشر أولاً."
+    ok_list, fail_list = [], []
+    for ch in channels:
+        ch_id = ch.get("id")
+        title = ch.get("title") or str(ch_id)
+        try:
+            if photo_id:
+                bot.send_photo(ch_id, photo_id, caption=text or None, parse_mode="Markdown")
+            else:
+                bot.send_message(ch_id, text, parse_mode="Markdown")
+            ok_list.append(title)
+        except Exception as e:
+            fail_list.append(f"{title}: {str(e)[:100]}")
+    report = "📢 **تقرير نشر الإعلان:**\n\n"
+    if ok_list:
+        report += f"✅ نُشر بنجاح في {len(ok_list)} قناة:\n" + "\n".join(f"  • {t}" for t in ok_list) + "\n\n"
+    if fail_list:
+        report += f"❌ فشل في {len(fail_list)} قناة:\n" + "\n".join(f"  • {t}" for t in fail_list)
+    return report
+
 def process_ui_advertisement(message):
     if message.from_user.id != ADMIN_ID: return
-    text=(message.text or "").strip()
-    if text in ("0", "إلغاء"):
-        set_ui_setting(UI_AD_KEY, ""); bot.send_message(message.chat.id, "✅ تم حذف الإعلان."); return
-    if not text:
-        msg=bot.send_message(message.chat.id, "❌ الإعلان فارغ، أرسله من جديد:"); bot.register_next_step_handler(msg, process_ui_advertisement); return
-    set_ui_setting(UI_AD_KEY, text[:3500]); bot.send_message(message.chat.id, "✅ تم حفظ الإعلان.")
+    text = (message.text or message.caption or "").strip()
+    photo_id = message.photo[-1].file_id if getattr(message, "photo", None) else None
+    if not photo_id and text in ("0", "إلغاء"):
+        save_ad_content("", None); bot.send_message(message.chat.id, "✅ تم حذف الإعلان."); return
+    if not photo_id and not text:
+        msg = bot.send_message(message.chat.id, "❌ الإعلان فارغ. أرسل نص أو صورة (مع نص اختياري) من جديد، أو 0 للإلغاء:", reply_markup=cancel_operation_markup())
+        bot.register_next_step_handler(msg, process_ui_advertisement); return
+    save_ad_content(text, photo_id)
+    extra = "\n🖼️ يحتوي على صورة." if photo_id else ""
+    bot.send_message(message.chat.id, f"✅ تم حفظ الإعلان.{extra}")
+
+
+def process_ad_channel_add(message):
+    if message.from_user.id != ADMIN_ID: return
+    text = (message.text or "").strip()
+    if text in ("0", "إلغاء") or text.startswith("/"):
+        bot.send_message(message.chat.id, "❌ تم إلغاء الإضافة."); return
+    try:
+        chat = bot.get_chat(text)
+        me = bot.get_me()
+        member = bot.get_chat_member(chat.id, me.id)
+        if member.status not in ("administrator", "creator"):
+            raise Exception("البوت ليس أدمن بهذه القناة، أضفه أدمن أولاً وحاول من جديد.")
+    except Exception as e:
+        msg = bot.send_message(
+            message.chat.id,
+            f"❌ تعذر إضافة القناة: {str(e)[:200]}\n\n"
+            "تأكد إن البوت أدمن بالقناة، وأرسل معرفها (مثل @mychannel) من جديد، أو 0 للإلغاء:",
+            reply_markup=cancel_operation_markup()
+        )
+        bot.register_next_step_handler(msg, process_ad_channel_add)
+        return
+    channels = get_ad_channels()
+    if any(str(c.get("id")) == str(chat.id) for c in channels):
+        bot.send_message(message.chat.id, f"⚠️ القناة ({chat.title or text}) مضافة مسبقاً."); return
+    channels.append({"id": chat.id, "title": chat.title or text})
+    save_ad_channels(channels)
+    bot.send_message(message.chat.id, f"✅ تمت إضافة قناة النشر: {chat.title or text}")
 
 def process_smart_maintenance_message(message):
     if message.from_user.id != ADMIN_ID: return
@@ -3518,13 +3668,32 @@ def _handle_layout_callback(call):
         if data == "ui_toggle_prices":
             set_ui_setting(UI_PRICE_SETTING_KEY, "0" if show_service_prices() else "1"); bot.answer_callback_query(call.id, "💰 تم تحديث عرض الأسعار"); _admin_ui_tools_menu(call.message.chat.id, call.message.message_id); return True
         if data == "ui_ad_menu":
-            cur=get_global_advertisement(); kb=types.InlineKeyboardMarkup(row_width=1); kb.add(types.InlineKeyboardButton("✏️ تغيير الإعلان", callback_data="ui_ad_set"))
-            if cur: kb.add(types.InlineKeyboardButton("🗑️ حذف الإعلان", callback_data="ui_ad_delete"))
-            kb.add(types.InlineKeyboardButton("🔙 أدوات الواجهة", callback_data="ui_tools_menu")); bot.edit_message_text(f"📢 **إدارة الإعلان**\n\n{cur or 'لا يوجد إعلان محفوظ.'}", call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown"); return True
+            _show_ui_ad_menu(call.message.chat.id, call.message.message_id); return True
         if data == "ui_ad_set":
-            msg=bot.send_message(call.message.chat.id, "📢 أرسل نص الإعلان. أرسل 0 لحذفه.", reply_markup=cancel_operation_markup()); bot.register_next_step_handler(msg, process_ui_advertisement); return True
+            msg=bot.send_message(call.message.chat.id, "📢 أرسل الآن نص الإعلان، أو صورة (مع نص اختياري كـ caption)، أو الصورة وحدها.\n\nأرسل 0 لحذف الإعلان.", reply_markup=cancel_operation_markup()); bot.register_next_step_handler(msg, process_ui_advertisement); return True
         if data == "ui_ad_delete":
-            set_ui_setting(UI_AD_KEY, ""); bot.answer_callback_query(call.id, "🗑️ تم حذف الإعلان"); _admin_ui_tools_menu(call.message.chat.id, call.message.message_id); return True
+            save_ad_content("", None); bot.answer_callback_query(call.id, "🗑️ تم حذف الإعلان"); _show_ui_ad_menu(call.message.chat.id, call.message.message_id); return True
+        if data == "ui_ad_channels_menu":
+            _show_ad_channels_menu(call.message.chat.id, call.message.message_id); return True
+        if data == "ui_ad_ch_add":
+            bot.answer_callback_query(call.id)
+            msg=bot.send_message(call.message.chat.id, "📡 أرسل معرف القناة (مثل @mychannel) أو آيديها الرقمي.\n⚠️ لازم يكون البوت أدمن بها.\n\nأرسل 0 للإلغاء.", reply_markup=cancel_operation_markup())
+            bot.register_next_step_handler(msg, process_ad_channel_add); return True
+        if data.startswith("ui_ad_ch_del|"):
+            try:
+                idx = int(data.split("|", 1)[1])
+                channels = get_ad_channels()
+                removed = channels.pop(idx)
+                save_ad_channels(channels)
+                bot.answer_callback_query(call.id, f"🗑️ تم حذف {removed['title']}")
+            except (ValueError, IndexError):
+                bot.answer_callback_query(call.id, "❌ القناة غير موجودة", show_alert=True)
+            _show_ad_channels_menu(call.message.chat.id, call.message.message_id); return True
+        if data == "ui_ad_publish":
+            bot.answer_callback_query(call.id, "🚀 جاري النشر...")
+            report = _publish_ad_now(call.message.chat.id)
+            bot.send_message(call.message.chat.id, report, parse_mode="Markdown"); return True
+
         if data == "ui_smart_maint_menu":
             cur=get_ui_setting(SMART_MAINT_KEY, "").strip()
             kb=types.InlineKeyboardMarkup(row_width=1)
