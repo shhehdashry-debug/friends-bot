@@ -2638,6 +2638,10 @@ def _layout_snapshot(menu_key, markup):
         # Keep the old text icon field only for backward compatibility.
         if saved.get("icon_custom_emoji_id"):
             item["icon_custom_emoji_id"] = str(saved.get("icon_custom_emoji_id"))
+        if saved.get("icon_photo_file_id"):
+            item["icon_photo_file_id"] = str(saved.get("icon_photo_file_id"))
+        if saved.get("icon_sticker_file_id"):
+            item["icon_sticker_file_id"] = str(saved.get("icon_sticker_file_id"))
         elif saved.get("icon"):
             item["icon"] = str(saved.get("icon"))[:16]
 
@@ -3524,8 +3528,11 @@ def _handle_layout_callback(call):
 
             msg = bot.send_message(
                 call.message.chat.id,
-                ("🎨 أرسل الآن **Custom Emoji** من تيليجرام الذي تريد ظهوره كشعار قبل اسم الزر.\n\n"
-                 "⚠️ أرسل Custom Emoji من لوحة الإيموجي في تيليجرام، وليس Emoji عادي من الكيبورد.\n"
+                ("🎨 أرسل الآن شعار الزر بأحد الشكلين:\n\n"
+                 "1️⃣ **Custom Emoji** من تيليجرام — يظهر داخل الزر كأيقونة حقيقية.\n"
+                 "2️⃣ **صورة** PNG/JPG — سيتم حفظها مع الزر كصورة مخصصة.\n"
+                 "3️⃣ **Sticker** من قسم الملصقات في تيليجرام — سيتم حفظه مع الزر.\n\n"
+                 "⚠️ ملاحظة: Telegram لا يسمح بوضع PNG/JPG أو Sticker مباشرة داخل InlineKeyboardButton؛ لذلك يتم حفظهما مع الزر، بينما الأيقونة داخل الزر نفسه تكون عبر Custom Emoji.\n"
                  "🗑️ لإزالة الشعار أرسل: 0" if icon_mode else "✏️ أرسل الاسم الجديد للزر:"),
                 parse_mode="Markdown"
             )
@@ -3541,9 +3548,18 @@ def _handle_layout_callback(call):
                     return
 
                 custom_emoji_id = ""
+                photo_file_id = ""
+                sticker_file_id = ""
                 if icon_mode:
-                    if new_name == "0":
+                    if new_name == "0" and not getattr(message, "photo", None) and not getattr(message, "sticker", None):
                         custom_emoji_id = ""
+                    elif getattr(message, "photo", None):
+                        # الصور تُحفظ مع إعداد الزر. Telegram لا يدعم الصور داخل نص
+                        # InlineKeyboardButton، لذلك لا نحول الصورة إلى Emoji وهمي.
+                        photo_file_id = str(message.photo[-1].file_id)
+                    elif getattr(message, "sticker", None):
+                        # دعم الملصقات المرسلة مباشرة من قسم Stickers في Telegram.
+                        sticker_file_id = str(message.sticker.file_id)
                     else:
                         # Telegram sends Custom Emoji as a message entity.
                         # Read the ID from the entity instead of storing the visual emoji character.
@@ -3562,7 +3578,7 @@ def _handle_layout_callback(call):
                         if not custom_emoji_id:
                             bot.send_message(
                                 message.chat.id,
-                                "❌ هذا ليس Custom Emoji. أرسل شعارًا من Custom Emoji في تيليجرام، وليس إيموجي عادي."
+                                "❌ أرسل Custom Emoji حقيقي أو صورة PNG/JPG أو Sticker من تيليجرام. الإيموجي العادي لا يكفي."
                             )
                             return
                 else:
@@ -3582,6 +3598,15 @@ def _handle_layout_callback(call):
                     if str(item.get("callback")) == str(cb):
                         if icon_mode:
                             item["icon_custom_emoji_id"] = custom_emoji_id
+                            if photo_file_id:
+                                item["icon_photo_file_id"] = photo_file_id
+                                item.pop("icon_sticker_file_id", None)
+                            elif sticker_file_id:
+                                item["icon_sticker_file_id"] = sticker_file_id
+                                item.pop("icon_photo_file_id", None)
+                            else:
+                                item.pop("icon_photo_file_id", None)
+                                item.pop("icon_sticker_file_id", None)
                             # Remove the old keyboard-emoji representation so it can never
                             # reappear before the button text.
                             item.pop("icon", None)
