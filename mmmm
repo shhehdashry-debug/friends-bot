@@ -1641,6 +1641,10 @@ def _show_dynamic_subcategory_menu(chat_id, message_id, parent_key, parent_callb
         )
     )
 
+    # نفس نظام ترتيب/أيقونات الأزرار يعمل هنا أيضاً، بدون إنشاء مسار جديد.
+    _layout_snapshot(page_id, markup)
+    _apply_button_layout(page_id, markup)
+
     try:
         bot.edit_message_text(
             "📂 **اختر القسم الفرعي:**",
@@ -1724,6 +1728,8 @@ def _show_custom_link_menu(chat_id, message_id, item_id):
         )
 
     _nav_enter(chat_id, f"custom:{item_id}", NAV_CURRENT.get(chat_id, "start"))
+    _layout_snapshot(f"custom:{item_id}", markup)
+    _apply_button_layout(f"custom:{item_id}", markup)
     markup.add(
         types.InlineKeyboardButton(
             "🔙 رجوع",
@@ -2618,15 +2624,22 @@ def _layout_snapshot(menu_key, markup):
     # حافظ على أسماء الأزرار المخصصة التي غيّرها الأدمن.
     # الـsnapshot يتحدث من الـmarkup الحالي، لذلك لا نسمح له
     # باستبدال الاسم المحفوظ بالاسم الأصلي بعد إعادة التشغيل/التحديث.
-    saved_labels = {
-        str(x.get("callback")): str(x.get("text", ""))
+    saved_buttons = {
+        str(x.get("callback")): x
         for x in old_buttons
         if isinstance(x, dict) and x.get("callback")
     }
     for item in items:
         cb = str(item.get("callback"))
-        if saved_labels.get(cb):
-            item["text"] = saved_labels[cb]
+        saved = saved_buttons.get(cb) or {}
+        if saved.get("text"):
+            item["text"] = str(saved.get("text"))
+        # Preserve the Telegram Custom Emoji ID chosen by the admin.
+        # Keep the old text icon field only for backward compatibility.
+        if saved.get("icon_custom_emoji_id"):
+            item["icon_custom_emoji_id"] = str(saved.get("icon_custom_emoji_id"))
+        elif saved.get("icon"):
+            item["icon"] = str(saved.get("icon"))[:16]
 
     old["buttons"] = items
     if not old.get("order"):
@@ -2658,8 +2671,8 @@ def _apply_button_layout(menu_key, markup):
     hidden = {str(x) for x in cfg.get("hidden", [])}
 
     # تطبيق الاسم المخصص المحفوظ على زر Telegram نفسه، وليس فقط على لوحة الإدارة.
-    saved_labels = {
-        str(x.get("callback")): str(x.get("text", ""))
+    saved_buttons = {
+        str(x.get("callback")): x
         for x in cfg.get("buttons", [])
         if isinstance(x, dict) and x.get("callback")
     }
@@ -2671,8 +2684,20 @@ def _apply_button_layout(menu_key, markup):
             cb = getattr(b, "callback_data", None)
             if cb:
                 cb = str(cb)
-                if saved_labels.get(cb):
-                    b.text = saved_labels[cb]
+                saved = saved_buttons.get(cb) or {}
+                saved_text = str(saved.get("text", ""))
+                saved_custom_emoji_id = str(saved.get("icon_custom_emoji_id", "")).strip()
+                if saved_text:
+                    # Custom Emoji is rendered by Telegram as a real icon before the button text.
+                    # Never put the old keyboard-emoji field into the button text.
+                    b.text = saved_text
+                if saved_custom_emoji_id:
+                    try:
+                        b.icon_custom_emoji_id = saved_custom_emoji_id
+                    except Exception:
+                        # Older pyTelegramBotAPI builds may not expose the field.
+                        # Do not break the bot; the stored ID will remain available after upgrade.
+                        pass
                 buttons[cb] = b
             else:
                 plain.append(b)
@@ -2766,7 +2791,7 @@ def _ensure_layout_target(menu_key):
             if str(v.get("subcat",""))==key:
                 items.append((str(k),str(v.get("btn_label",v.get("name","خدمة")))))
     if not items: return None
-    data[key]={"buttons":[{"callback":cb,"text":txt} for cb,txt in items],"order":[cb for cb,_ in items],"rows":[[cb] for cb,_ in items],"hidden":[],"columns":1}
+    data[key]={"buttons":[{"callback":cb,"text":txt,"icon":""} for cb,txt in items],"order":[cb for cb,_ in items],"rows":[[cb] for cb,_ in items],"hidden":[],"columns":1}
     _save_button_layouts(data)
     return data[key]
 
@@ -2787,7 +2812,7 @@ def _show_layout_targets(chat_id, message_id=None):
     else:
         bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
 
-def _show_layout_rename_buttons(call, key):
+def _show_layout_rename_buttons(call, key, mode="name"):
     data = _load_button_layouts()
     cfg = data.get(key) or _ensure_layout_target(key)
 
@@ -2809,10 +2834,16 @@ def _show_layout_rename_buttons(call, key):
     for idx, cb in enumerate(order):
         button_name = str(labels.get(cb, cb))
         # استخدام رقم الزر بدل callback نفسه يمنع تجاوز حد Telegram البالغ 64 بايت.
+        if mode == "icon":
+            button_prefix = "🎨"
+            callback_prefix = "layout_icon_pick"
+        else:
+            button_prefix = "✏️"
+            callback_prefix = "layout_rename_pick"
         markup.add(
             types.InlineKeyboardButton(
-                f"✏️ {button_name[:40]}",
-                callback_data=f"layout_rename_pick|{key}|{idx}"
+                f"{button_prefix} {button_name[:40]}",
+                callback_data=f"{callback_prefix}|{key}|{idx}"
             )
         )
 
@@ -2825,7 +2856,7 @@ def _show_layout_rename_buttons(call, key):
 
     try:
         bot.edit_message_text(
-            "✏️ **تغيير اسم زر**\n\nاختر الزر الذي تريد تغيير اسمه:",
+            ("🎨 **تغيير أيقونة زر**\n\nاختر الزر الذي تريد تغيير أيقونته:" if mode == "icon" else "✏️ **تغيير اسم زر**\n\nاختر الزر الذي تريد تغيير اسمه:"),
             call.message.chat.id,
             call.message.message_id,
             reply_markup=markup,
@@ -2901,6 +2932,13 @@ def _show_layout_editor(chat_id, message_id, menu_key):
 
     markup.add(
         types.InlineKeyboardButton(
+            "🎨 تغيير أيقونة زر",
+            callback_data=f"layout_icon_menu|{menu_key}"
+        )
+    )
+
+    markup.add(
+        types.InlineKeyboardButton(
             "♻️ إعادة ضبط",
             callback_data=f"layout_reset|{menu_key}"
         )
@@ -2943,7 +2981,15 @@ def _show_layout_editor(chat_id, message_id, menu_key):
         )
 
 def _layout_labels(cfg):
-    return {str(x.get("callback")): str(x.get("text", "زر")) for x in cfg.get("buttons", [])}
+    result = {}
+    for x in cfg.get("buttons", []):
+        cb = str(x.get("callback", ""))
+        if not cb:
+            continue
+        text = str(x.get("text", "زر"))
+        icon = str(x.get("icon", "")).strip()
+        result[cb] = f"{icon} {text}".strip() if icon else text
+    return result
 
 
 def _layout_save_cfg(key, cfg):
@@ -3446,11 +3492,17 @@ def _handle_layout_callback(call):
             )
             return True
 
+        if data.startswith("layout_icon_menu|"):
+            key = data.split("|", 1)[1]
+            _show_layout_rename_buttons(call, key, mode="icon")
+            return True
+
         if data.startswith("layout_rename_menu|"):
             key = data.split("|", 1)[1]
-            _show_layout_rename_buttons(call, key)
+            _show_layout_rename_buttons(call, key, mode="name")
             return True
-        if data.startswith("layout_rename_pick|"):
+        if data.startswith("layout_rename_pick|") or data.startswith("layout_icon_pick|"):
+            icon_mode = data.startswith("layout_icon_pick|")
             _, key, idx_s = data.split("|", 2)
 
             try:
@@ -3472,7 +3524,10 @@ def _handle_layout_callback(call):
 
             msg = bot.send_message(
                 call.message.chat.id,
-                "✏️ أرسل الاسم الجديد للزر:",
+                ("🎨 أرسل الآن **Custom Emoji** من تيليجرام الذي تريد ظهوره كشعار قبل اسم الزر.\n\n"
+                 "⚠️ أرسل Custom Emoji من لوحة الإيموجي في تيليجرام، وليس Emoji عادي من الكيبورد.\n"
+                 "🗑️ لإزالة الشعار أرسل: 0" if icon_mode else "✏️ أرسل الاسم الجديد للزر:"),
+                parse_mode="Markdown"
             )
 
             def receive_button_name(message):
@@ -3482,16 +3537,41 @@ def _handle_layout_callback(call):
                 new_name = (message.text or "").strip()
 
                 if new_name.lower() == "/cancel":
-                    bot.send_message(message.chat.id, "❌ تم إلغاء تغيير اسم الزر.")
+                    bot.send_message(message.chat.id, "❌ تم إلغاء العملية.")
                     return
 
-                if not new_name:
-                    bot.send_message(message.chat.id, "❌ الاسم فارغ، أرسل اسمًا صحيحًا.")
-                    return
+                custom_emoji_id = ""
+                if icon_mode:
+                    if new_name == "0":
+                        custom_emoji_id = ""
+                    else:
+                        # Telegram sends Custom Emoji as a message entity.
+                        # Read the ID from the entity instead of storing the visual emoji character.
+                        for entity in (getattr(message, "entities", None) or []):
+                            entity_type = getattr(entity, "type", "")
+                            entity_id = getattr(entity, "custom_emoji_id", None)
+                            if not entity_id and hasattr(entity, "to_dict"):
+                                try:
+                                    entity_id = entity.to_dict().get("custom_emoji_id")
+                                except Exception:
+                                    entity_id = None
+                            if entity_type == "custom_emoji" and entity_id:
+                                custom_emoji_id = str(entity_id)
+                                break
 
-                if len(new_name) > 60:
-                    bot.send_message(message.chat.id, "❌ الاسم طويل جدًا، الحد الأقصى 60 حرفًا.")
-                    return
+                        if not custom_emoji_id:
+                            bot.send_message(
+                                message.chat.id,
+                                "❌ هذا ليس Custom Emoji. أرسل شعارًا من Custom Emoji في تيليجرام، وليس إيموجي عادي."
+                            )
+                            return
+                else:
+                    if not new_name:
+                        bot.send_message(message.chat.id, "❌ الاسم فارغ، أرسل اسمًا صحيحًا.")
+                        return
+                    if len(new_name) > 60:
+                        bot.send_message(message.chat.id, "❌ الاسم طويل جدًا، الحد الأقصى 60 حرفًا.")
+                        return
 
                 all_data = dict(_load_button_layouts())
                 cfg = dict(all_data.get(key, {}))
@@ -3500,7 +3580,13 @@ def _handle_layout_callback(call):
 
                 for item in buttons:
                     if str(item.get("callback")) == str(cb):
-                        item["text"] = new_name
+                        if icon_mode:
+                            item["icon_custom_emoji_id"] = custom_emoji_id
+                            # Remove the old keyboard-emoji representation so it can never
+                            # reappear before the button text.
+                            item.pop("icon", None)
+                        else:
+                            item["text"] = new_name
                         found = True
                         break
 
@@ -3515,7 +3601,7 @@ def _handle_layout_callback(call):
                 # إذا كان الزر المسمى زرًا مخصصًا، حدّث اسمه الأصلي أيضًا،
                 # ثم زامن الاسم مع كل الواجهات حتى لا يظهر الاسم القديم
                 # في إضافة خدمة/قسم فرعي/وصف وغيرها.
-                if str(cb).startswith("custom_menu|"):
+                if (not icon_mode) and str(cb).startswith("custom_menu|"):
                     custom_id = str(cb).split("|", 1)[1]
                     custom_items = list(_load_custom_link_buttons())
                     custom_item = next(
@@ -3529,7 +3615,7 @@ def _handle_layout_callback(call):
 
                 bot.send_message(
                     message.chat.id,
-                    f"✅ تم تغيير اسم الزر إلى:\n\n{new_name}"
+                    ("✅ تم حفظ شعار Custom Emoji للزر." if icon_mode else f"✅ تم تغيير اسم الزر إلى:\n\n{new_name}")
                 )
 
             bot.register_next_step_handler(msg, receive_button_name)
