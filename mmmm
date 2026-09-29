@@ -1318,73 +1318,70 @@ def _save_subcategories_to_db():
         return False
 
 
+def _normalize_sub_callback(value):
+    """يوحّد كل صيغ مفاتيح الأقسام الفرعية إلى callback واحد."""
+    v = str(value or "").strip()
+    # إزالة أي عدد من بادئات sub: التي قد تنتج من الأقسام المتداخلة.
+    while v.startswith("sub:"):
+        v = v[4:]
+    if v and not v.startswith("sub_"):
+        v = "sub_" + v
+    return v
+
+
+def _sub_aliases(value):
+    """كل الصيغ الممكنة لنفس القسم الفرعي."""
+    cb = _normalize_sub_callback(value)
+    if not cb:
+        return set()
+    return {cb, f"sub:{cb}"}
+
+
 def _find_sub_parent(sub_callback):
-    """يرجع الأب الذي يحتوي القسم الفرعي المطلوب، مع دعم الأقسام المتداخلة خارج CATEGORIES."""
-    target = str(sub_callback or "").strip()
-    # في العرض العام للقسم الفرعي المتداخل قد يكون المفتاح sub:sub_x،
-    # بينما callback الحقيقي المخزن داخل العنصر هو sub_x.
-    if target.startswith("sub:"):
-        target = target[4:]
-    if target and not target.startswith("sub_"):
-        target = "sub_" + target
+    """يرجع الأب الذي يحتوي القسم الفرعي، حتى لو كان مخزناً بصيغة مختلفة."""
+    wanted = _normalize_sub_callback(sub_callback)
+    if not wanted:
+        return None
 
     for parent_key, subs in SUB_CATEGORIES.items():
         for sub in subs or []:
             if not isinstance(sub, dict):
                 continue
-            cb = str(sub.get("callback", "")).strip()
-            if cb and not cb.startswith("sub_"):
-                cb = "sub_" + cb
-            if cb == target:
+            cb = _normalize_sub_callback(sub.get("callback", ""))
+            if cb == wanted:
                 return parent_key
     return None
 
 
 def _collect_subtree_keys(parent_key):
-    """يجمع القسم وكل مستوياته المتداخلة بصيغ التخزين والـcallback لحذفها بأمان."""
-    root = str(parent_key or "").strip()
-    if not root:
+    """يجمع القسم وكل الأبناء مهما اختلفت صيغة التخزين (sub_x / sub:sub_x)."""
+    root_cb = _normalize_sub_callback(parent_key)
+    if not root_cb:
         return set()
 
-    # callback الحقيقي للقسم، حتى لو وصلنا بمفتاح sub:sub_x.
-    root_cb = root[4:] if root.startswith("sub:") else root
-    if root_cb and not root_cb.startswith("sub_"):
-        root_cb = "sub_" + root_cb
+    seen_cb = set()
+    queue = [root_cb]
 
-    pending = [root, root_cb]
-    seen = set()
-
-    while pending:
-        key = str(pending.pop(0) or "").strip()
-        if not key or key in seen:
+    while queue:
+        cb = _normalize_sub_callback(queue.pop(0))
+        if not cb or cb in seen_cb:
             continue
-        seen.add(key)
+        seen_cb.add(cb)
 
-        # القسم المتداخل يخزن أبناءه تحت sub:<callback>،
-        # بينما القسم العادي يخزن أبناءه تحت callback نفسه.
-        lookup_keys = [key]
-        if key.startswith("sub:"):
-            cb_key = key[4:]
-            lookup_keys.append(cb_key)
-        elif key.startswith("sub_"):
-            lookup_keys.append(f"sub:{key}")
-
-        for lookup_key in lookup_keys:
+        # أبناء القسم قد تكون تحت cb أو sub:cb.
+        for lookup_key in (cb, f"sub:{cb}"):
             for sub in SUB_CATEGORIES.get(lookup_key, []) or []:
                 if not isinstance(sub, dict):
                     continue
-                cb = str(sub.get("callback", "")).strip()
-                if not cb:
-                    continue
-                if cb.startswith("sub:"):
-                    cb = cb[4:]
-                if not cb.startswith("sub_"):
-                    cb = "sub_" + cb
-                pending.append(cb)
-                pending.append(f"sub:{cb}")
+                child_cb = _normalize_sub_callback(sub.get("callback", ""))
+                if child_cb and child_cb not in seen_cb:
+                    queue.append(child_cb)
 
-    return seen
-
+    # نرجع aliases حتى تنظيف الخدمات والـlayout يشمل الصيغتين.
+    result = set()
+    for cb in seen_cb:
+        result.update(_sub_aliases(cb))
+    return result
 
 def _remove_layout_references(keys, callbacks=None):
     """ينظف مراجع العناصر المحذوفة من مدير ترتيب الأزرار فقط."""
@@ -1523,11 +1520,22 @@ def _delete_parent_everywhere(parent_key):
     # 3) قسم فرعي مستقل أو متداخل خارج CATEGORIES
     if (parent_key.startswith("sub_") or parent_key.startswith("sub:")
             or parent_key in SUB_CATEGORIES):
+        normalized_parent = _normalize_sub_callback(parent_key)
+        aliases = _sub_aliases(parent_key)
         owner = _find_sub_parent(parent_key)
-        if owner is None:
-            # إذا كان المفتاح نفسه مفتاح تخزين لقسم متداخل، اعتبره صالحاً.
-            owner = parent_key if parent_key in SUB_CATEGORIES else None
-        if owner is None:
+
+        # لا نعتمد على owner فقط؛ بعض الأقسام الفرعية القديمة/المتداخلة
+        # تكون محفوظة تحت sub:<callback> بدون أن يكون لها مفتاح مباشر.
+        referenced = any(
+            any(
+                isinstance(sub, dict)
+                and _normalize_sub_callback(sub.get("callback", "")) == normalized_parent
+                for sub in (subs or [])
+            )
+            for subs in SUB_CATEGORIES.values()
+        )
+        stored = any(alias in SUB_CATEGORIES for alias in aliases)
+        if owner is None and not referenced and not stored:
             return False, "القسم غير موجود."
 
         tree = _collect_subtree_keys(parent_key)
