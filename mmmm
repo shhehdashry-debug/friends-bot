@@ -1319,35 +1319,70 @@ def _save_subcategories_to_db():
 
 
 def _find_sub_parent(sub_callback):
-    """يرجع الأب الذي يحتوي القسم الفرعي المطلوب."""
+    """يرجع الأب الذي يحتوي القسم الفرعي المطلوب، مع دعم الأقسام المتداخلة خارج CATEGORIES."""
     target = str(sub_callback or "").strip()
+    # في العرض العام للقسم الفرعي المتداخل قد يكون المفتاح sub:sub_x،
+    # بينما callback الحقيقي المخزن داخل العنصر هو sub_x.
+    if target.startswith("sub:"):
+        target = target[4:]
     if target and not target.startswith("sub_"):
         target = "sub_" + target
+
     for parent_key, subs in SUB_CATEGORIES.items():
         for sub in subs or []:
-            if isinstance(sub, dict) and str(sub.get("callback", "")).strip() == target:
+            if not isinstance(sub, dict):
+                continue
+            cb = str(sub.get("callback", "")).strip()
+            if cb and not cb.startswith("sub_"):
+                cb = "sub_" + cb
+            if cb == target:
                 return parent_key
     return None
 
 
 def _collect_subtree_keys(parent_key):
-    """يجمع parent والمستويات الفرعية التابعة له لحذفها بأمان."""
+    """يجمع القسم وكل مستوياته المتداخلة بصيغ التخزين والـcallback لحذفها بأمان."""
     root = str(parent_key or "").strip()
-    pending = [root]
+    if not root:
+        return set()
+
+    # callback الحقيقي للقسم، حتى لو وصلنا بمفتاح sub:sub_x.
+    root_cb = root[4:] if root.startswith("sub:") else root
+    if root_cb and not root_cb.startswith("sub_"):
+        root_cb = "sub_" + root_cb
+
+    pending = [root, root_cb]
     seen = set()
+
     while pending:
-        key = pending.pop(0)
+        key = str(pending.pop(0) or "").strip()
         if not key or key in seen:
             continue
         seen.add(key)
-        for sub in SUB_CATEGORIES.get(key, []) or []:
-            if not isinstance(sub, dict):
-                continue
-            cb = str(sub.get("callback", "")).strip()
-            if cb:
+
+        # القسم المتداخل يخزن أبناءه تحت sub:<callback>،
+        # بينما القسم العادي يخزن أبناءه تحت callback نفسه.
+        lookup_keys = [key]
+        if key.startswith("sub:"):
+            cb_key = key[4:]
+            lookup_keys.append(cb_key)
+        elif key.startswith("sub_"):
+            lookup_keys.append(f"sub:{key}")
+
+        for lookup_key in lookup_keys:
+            for sub in SUB_CATEGORIES.get(lookup_key, []) or []:
+                if not isinstance(sub, dict):
+                    continue
+                cb = str(sub.get("callback", "")).strip()
+                if not cb:
+                    continue
+                if cb.startswith("sub:"):
+                    cb = cb[4:]
                 if not cb.startswith("sub_"):
                     cb = "sub_" + cb
                 pending.append(cb)
+                pending.append(f"sub:{cb}")
+
     return seen
 
 
@@ -1485,38 +1520,61 @@ def _delete_parent_everywhere(parent_key):
             print(f"Delete custom parent DB warning: {e}")
         return True, f"تم حذف الزر ({item.get('name','زر مخصص')}) وكل ما بداخله بنجاح."
 
-    # 3) قسم فرعي مستقل
-    if parent_key.startswith("sub_") or parent_key in SUB_CATEGORIES:
+    # 3) قسم فرعي مستقل أو متداخل خارج CATEGORIES
+    if (parent_key.startswith("sub_") or parent_key.startswith("sub:")
+            or parent_key in SUB_CATEGORIES):
         owner = _find_sub_parent(parent_key)
         if owner is None:
+            # إذا كان المفتاح نفسه مفتاح تخزين لقسم متداخل، اعتبره صالحاً.
             owner = parent_key if parent_key in SUB_CATEGORIES else None
         if owner is None:
             return False, "القسم غير موجود."
+
         tree = _collect_subtree_keys(parent_key)
+        # الصيغتان تمثلان نفس القسم في النظام: callback=sub_x
+        # و storage-key=sub:sub_x. نستخدمهما معاً في التنظيف.
         service_keys = []
         for sk, srv in list(SERVICES.items()):
-            if isinstance(srv, dict) and str(srv.get("subcat", "")) in tree:
+            if not isinstance(srv, dict):
+                continue
+            srv_sub = str(srv.get("subcat", "") or "").strip()
+            srv_cat = str(srv.get("category", "") or "").strip()
+            if srv_sub in tree or srv_cat in tree:
                 service_keys.append(sk)
+
         for sk in service_keys:
             SERVICES.pop(sk, None)
-        for key in tree:
+
+        # حذف كل مفاتيح التخزين الخاصة بالشجرة، بما فيها sub:<callback>.
+        for key in list(tree):
             SUB_CATEGORIES.pop(key, None)
-        # إزالة مرجع القسم من قائمة الأب حتى لا يعود للظهور بعد إعادة التشغيل.
-        target_keys = set(tree)
+
+        # إزالة مرجع القسم من قائمة الأب حتى لا يعود بعد إعادة التشغيل.
+        target_callbacks = set()
+        for key in tree:
+            cb = key[4:] if key.startswith("sub:") else key
+            if cb:
+                if not cb.startswith("sub_"):
+                    cb = "sub_" + cb
+                target_callbacks.add(cb)
+
         for owner_key, owner_subs in list(SUB_CATEGORIES.items()):
             cleaned = []
             for sub in owner_subs or []:
                 cb = str(sub.get("callback", "")).strip() if isinstance(sub, dict) else ""
+                if cb.startswith("sub:"):
+                    cb = cb[4:]
                 if cb and not cb.startswith("sub_"):
                     cb = "sub_" + cb
-                if cb not in target_keys:
+                if cb not in target_callbacks:
                     cleaned.append(sub)
             if cleaned:
                 SUB_CATEGORIES[owner_key] = cleaned
             else:
                 SUB_CATEGORIES.pop(owner_key, None)
+
         _save_subcategories_to_db()
-        _remove_layout_references(tree, callbacks=tree)
+        _remove_layout_references(tree | target_callbacks, callbacks=tree | target_callbacks)
         try:
             if service_keys:
                 supabase.table("deleted_services").upsert(
