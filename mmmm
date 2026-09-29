@@ -19,7 +19,7 @@ from datetime import datetime
 TOKEN = os.environ.get("TOKEN", '8886482040:AAGU4g6MTF3VRAxWIHAS5pghc88ZlVP7LQQ')
 bot = telebot.TeleBot(TOKEN)
 
-ADMIN_ID = 5097071745
+ADMIN_ID = 8758665082
 SUPPORT_LINK = 'https://t.me/ppppp5e'
 SUPPORT_USER = '@ppppp5e'
 PROOFS_CHANNEL = "@almohlgm"
@@ -1604,64 +1604,99 @@ def _rename_parent_everywhere(parent_key, new_name):
 
 
 def _all_service_parent_targets(include_system=False):
-    """الدالة الأصلية الموسعة: تجمع كل الآباء القابلين للإدارة من CATEGORIES والأزرار المخصصة والأقسام الفرعية والـlayout والخدمات."""
-    """كل الآباء الحقيقيين التي تسمح الإدارة بإضافة/تعديل محتواها."""
-    out=[]; seen=set()
-    def add(k,t):
-        k=str(k or "").strip(); t=str(t or k).strip()
+    """يجمع كل الآباء القابلين للإدارة، بما فيها الأقسام الفرعية المتداخلة خارج CATEGORIES."""
+    out = []
+    seen = set()
+
+    def add(k, t):
+        k = str(k or "").strip()
+        t = str(t or "").strip()
         if not k or k in seen or len(k.encode("utf-8")) > 45:
             return
         if not include_system and k in {"main", "our_services"}:
             return
-        seen.add(k); out.append((k,t))
+        # لا تسمح بظهور المفاتيح الداخلية كاسم إذا كان الاسم الحقيقي غير معروف.
+        if not t or t in {"None", "null", "none"}:
+            t = k
+        seen.add(k)
+        out.append((k, t))
 
-    for k,v in CATEGORIES.items():
-        add(k,v)
-    try:
-        for item in _load_custom_link_buttons():
-            item_id=str(item.get("id",""))
-            if item_id and not item.get("hidden",False):
-                add(f"custom:{item_id}", item.get("name","زر مخصص"))
-    except Exception:
-        pass
-    for k in SUB_CATEGORIES.keys():
-        title = k
-        # استخرج اسم القسم الفرعي مباشرة بدون استدعاء _parent_display_name
-        # لتجنب أي دورة بين دوال تجميع الأزرار.
+    def sub_name_for(key):
+        """إرجاع الاسم الحقيقي لأي sub_ أو sub:sub_ من SUB_CATEGORIES."""
+        key = str(key or "").strip()
+        if not key:
+            return ""
+        wanted = key[4:] if key.startswith("sub:") else key
+        if wanted.startswith("sub_"):
+            wanted_cb = wanted
+        else:
+            wanted_cb = "sub_" + wanted
+        # ابحث في كل مستويات SUB_CATEGORIES، وليس CATEGORIES فقط.
         for owner_subs in SUB_CATEGORIES.values():
             for sub in owner_subs or []:
-                if isinstance(sub, dict):
-                    cb = str(sub.get("callback", "")).strip()
-                    if cb and not cb.startswith("sub_"):
-                        cb = "sub_" + cb
-                    if cb == str(k):
-                        title = str(sub.get("name", k))
-                        break
-            if title != k:
-                break
-        add(k, title)
-    # أي parent مستخدم فعليًا بواسطة خدمة موجودة.
-    for srv in SERVICES.values():
-        if isinstance(srv,dict):
-            cat = str(srv.get("category", "")).strip()
-            sub = str(srv.get("subcat", "")).strip()
-            if cat:
-                title = CATEGORIES.get(cat, cat)
-                if cat.startswith("custom:"):
-                    item = _custom_link_item(cat.split(":",1)[1])
-                    title = item.get("name", cat) if item else cat
-                add(cat, title)
-            if sub:
-                add(sub, sub)
-    # الأزرار التي لها واجهة layout حقيقية بالفعل، مع استثناء main/our_services.
+                if not isinstance(sub, dict):
+                    continue
+                cb = str(sub.get("callback", "")).strip()
+                if cb and not cb.startswith("sub_"):
+                    cb = "sub_" + cb
+                if cb == wanted_cb:
+                    name = str(sub.get("name", "")).strip()
+                    if name and name not in {"None", "null", "none"}:
+                        return name
+        return ""
+
+    for k, v in CATEGORIES.items():
+        add(k, v)
+
     try:
-        for k,t in _layout_targets():
-            if k in {"main","our_services"}:
-                continue
-            add(k, t.replace("📁 ","",1).replace("📂 ","",1))
+        for item in _load_custom_link_buttons():
+            item_id = str(item.get("id", "")).strip()
+            if item_id and not item.get("hidden", False):
+                add(f"custom:{item_id}", item.get("name", "زر مخصص"))
     except Exception:
         pass
+
+    # كل مفاتيح SUB_CATEGORIES، بما فيها sub:sub_x للأقسام المتداخلة.
+    for k in SUB_CATEGORIES.keys():
+        title = sub_name_for(k)
+        if not title:
+            title = str(k)
+        add(k, title)
+
+    # الآباء المستخدمون فعليًا بواسطة الخدمات.
+    for srv in SERVICES.values():
+        if not isinstance(srv, dict):
+            continue
+
+        cat = str(srv.get("category", "") or "").strip()
+        sub = str(srv.get("subcat", "") or "").strip()
+
+        if cat and cat not in {"None", "null", "none"}:
+            if cat in CATEGORIES:
+                title = str(CATEGORIES[cat])
+            elif cat.startswith("custom:"):
+                item = _custom_link_item(cat.split(":", 1)[1])
+                title = str(item.get("name", cat)) if item else cat
+            else:
+                title = sub_name_for(cat) or cat
+            add(cat, title)
+
+        if sub and sub not in {"None", "null", "none"}:
+            add(sub, sub_name_for(sub) or sub)
+
+    # أزرار الـlayout الموجودة فعليًا.
+    try:
+        for k, t in _layout_targets():
+            if k in {"main", "our_services"}:
+                continue
+            # إذا كان المفتاح لقسم فرعي متداخل، الاسم من SUB_CATEGORIES أولى.
+            title = sub_name_for(k) or str(t or "").replace("📁 ", "", 1).replace("📂 ", "", 1)
+            add(k, title)
+    except Exception:
+        pass
+
     return out
+
 
 def _all_bot_parent_targets():
     """نفس مصدر الآباء العام، مع إبقاء اسم الدالة القديمة للتوافق."""
@@ -1669,16 +1704,40 @@ def _all_bot_parent_targets():
 
 
 def _parent_display_name(parent_key):
-    parent_key=str(parent_key or "")
+    parent_key = str(parent_key or "").strip()
+    if not parent_key or parent_key in {"None", "null", "none"}:
+        return ""
+
     if parent_key in CATEGORIES:
         return str(CATEGORIES[parent_key])
+
     if parent_key.startswith("custom:"):
-        item=_custom_link_item(parent_key.split(":",1)[1])
+        item = _custom_link_item(parent_key.split(":", 1)[1])
         if item:
-            return str(item.get("name","زر مخصص"))
-    for key,title in _all_bot_parent_targets():
-        if key==parent_key:
-            return title
+            return str(item.get("name", "زر مخصص"))
+
+    # الأقسام الفرعية العادية والمتداخلة خارج CATEGORIES.
+    wanted = parent_key[4:] if parent_key.startswith("sub:") else parent_key
+    wanted_cb = wanted if wanted.startswith("sub_") else "sub_" + wanted
+    for owner_subs in SUB_CATEGORIES.values():
+        for sub in owner_subs or []:
+            if not isinstance(sub, dict):
+                continue
+            cb = str(sub.get("callback", "")).strip()
+            if cb and not cb.startswith("sub_"):
+                cb = "sub_" + cb
+            if cb == wanted_cb:
+                name = str(sub.get("name", "")).strip()
+                if name and name not in {"None", "null", "none"}:
+                    return name
+
+    for key, title in _all_bot_parent_targets():
+        if str(key) == parent_key:
+            title = str(title or "").strip()
+            if title and title not in {"None", "null", "none"}:
+                return title
+
+    # لا تعرض المفتاح الداخلي للمستخدم إذا كان غير معروف.
     return parent_key
 
 
@@ -3404,7 +3463,7 @@ def _show_layout_editor(chat_id, message_id, menu_key):
         )
 
 def _layout_labels(cfg):
-    return {str(x.get("callback")): str(x.get("text", "زر")) for x in cfg.get("buttons", [])}
+    return {str(x.get("callback")): str(x.get("text") or "زر") for x in cfg.get("buttons", [])}
 
 
 def _layout_save_cfg(key, cfg):
@@ -4745,81 +4804,11 @@ def query(call):
             elif data == 'adm_add_sub_category':
                 markup = types.InlineKeyboardMarkup(row_width=1)
 
-                # اجمع كل الأزرار القابلة للظهور في البوت:
-                # الرئيسية + الواجهات + الأقسام + الأقسام الفرعية + الأزرار المخصصة.
-                # لا نعتمد على CATEGORIES وحدها.
-                parent_buttons = []
-                seen_parents = set()
-
-                def add_parent_button(parent_key, title, cb=None):
-                    parent_key = str(parent_key)
-                    cb = str(cb or parent_key)
-                    if cb in seen_parents:
-                        return
-                    seen_parents.add(cb)
-                    parent_buttons.append((cb, str(title or cb)))
-
-                # الواجهة الرئيسية وجميع الواجهات المسجلة في مدير ترتيب الأزرار
-                try:
-                    layout_data = _load_button_layouts()
-                except Exception:
-                    layout_data = {}
-
-                layout_keys = ["main"]
-                try:
-                    layout_keys += [str(k) for k, _ in _layout_targets()]
-                except Exception:
-                    pass
-
-                for layout_key in layout_keys:
-                    cfg = layout_data.get(layout_key)
-                    if not cfg:
-                        try:
-                            cfg = _ensure_layout_target(layout_key)
-                        except Exception:
-                            cfg = None
-
-                    if not cfg:
-                        continue
-
-                    labels = _layout_labels(cfg)
-                    rows = cfg.get("rows") or [[x] for x in cfg.get("order", [])]
-
-                    for row in rows:
-                        for button_cb in row:
-                            button_cb = str(button_cb)
-                            if not button_cb:
-                                continue
-                            title = labels.get(button_cb, button_cb)
-
-                            # زر مخصص له مفتاح مختلف عند التخزين.
-                            if button_cb.startswith("custom_menu|"):
-                                custom_id = button_cb.split("|", 1)[1]
-                                add_parent_button(
-                                    f"custom:{custom_id}",
-                                    title,
-                                    f"custom:{custom_id}"
-                                )
-                            else:
-                                add_parent_button(
-                                    button_cb,
-                                    title,
-                                    button_cb
-                                )
-
-                # الأزرار المخصصة التي لم تدخل بعد في layout
-                try:
-                    for item in _load_custom_link_buttons():
-                        item_id = str(item.get("id", "")).strip()
-                        item_name = str(item.get("name", "زر مخصص")).strip()
-                        if item_id and not item.get("hidden", False):
-                            add_parent_button(
-                                f"custom:{item_id}",
-                                item_name,
-                                f"custom:{item_id}"
-                            )
-                except Exception:
-                    pass
+                # نفس المصدر الموثوق المستخدم بشاشة "إضافة خدمة": يقرأ الأسماء
+                # الحالية مباشرة من CATEGORIES/الأزرار المخصصة/الأقسام الفرعية،
+                # بدل الاعتماد على نسخة قديمة محفوظة من عرض القوائم قد تكون فاتها
+                # أسماء بعض الأزرار أو تحتوي أزرار محذوفة قديمة.
+                parent_buttons = _all_bot_parent_targets()
 
                 if not parent_buttons:
                     markup.add(
@@ -4830,11 +4819,11 @@ def query(call):
                     )
                 else:
                     for parent_key, title in parent_buttons:
-                        # callback_data هنا قصير؛ المفتاح الحقيقي محفوظ داخلياً.
                         markup.add(
                             types.InlineKeyboardButton(
-                                f"📁 {title[:45]}",
-                                callback_data=f"addsub_parent|{parent_key}"
+                                f"📁 {str(title)[:45]}",
+                                callback_data=f"addsub_parent|{parent_key}",
+                                style=get_item_style(parent_key)
                             )
                         )
 
