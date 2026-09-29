@@ -2445,7 +2445,7 @@ def register_user_if_new(user_id, first_name, username, referrer_id=None):
 # ⚡ Cache لفحص الاشتراك لتسريع الأزرار
 # ==========================================
 SUB_CACHE = {}
-SUB_CACHE_TTL = 5 * 60  # 5 دقائق
+SUB_CACHE_TTL = 5
 
 def check_sub(user_id):
     now = time.time()
