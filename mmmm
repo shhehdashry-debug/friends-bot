@@ -1354,7 +1354,7 @@ def _find_sub_parent(sub_callback):
 
 
 def _collect_subtree_keys(parent_key):
-    """يجمع القسم وكل الأبناء مهما اختلفت صيغة التخزين (sub_x / sub:sub_x)."""
+    """يجمع القسم وكل الأبناء مهما اختلفت صيغة التخزين."""
     root_cb = _normalize_sub_callback(parent_key)
     if not root_cb:
         return set()
@@ -1364,23 +1364,39 @@ def _collect_subtree_keys(parent_key):
 
     while queue:
         cb = _normalize_sub_callback(queue.pop(0))
+
         if not cb or cb in seen_cb:
             continue
+
         seen_cb.add(cb)
 
-        # أبناء القسم قد تكون تحت cb أو sub:cb.
-        for lookup_key in (cb, f"sub:{cb}"):
-            for sub in SUB_CATEGORIES.get(lookup_key, []) or []:
+        # نبحث في جميع مفاتيح SUB_CATEGORIES
+        # بدل الاعتماد فقط على cb و sub:cb.
+        for storage_key, subs in list(SUB_CATEGORIES.items()):
+
+            storage_cb = _normalize_sub_callback(storage_key)
+
+            if storage_cb != cb:
+                continue
+
+            for sub in subs or []:
+
                 if not isinstance(sub, dict):
                     continue
-                child_cb = _normalize_sub_callback(sub.get("callback", ""))
+
+                child_cb = _normalize_sub_callback(
+                    sub.get("callback", "")
+                )
+
                 if child_cb and child_cb not in seen_cb:
                     queue.append(child_cb)
 
-    # نرجع aliases حتى تنظيف الخدمات والـlayout يشمل الصيغتين.
+    # إرجاع جميع الصيغ الممكنة
     result = set()
+
     for cb in seen_cb:
         result.update(_sub_aliases(cb))
+
     return result
 
 def _remove_layout_references(keys, callbacks=None):
@@ -5105,15 +5121,32 @@ def query(call):
             return
 
         elif data.startswith('delsub2|'):
-            parts=data.split("|",2)
-            if len(parts)!=3:
-                bot.answer_callback_query(call.id,"❌ بيانات الحذف غير صحيحة",show_alert=True)
+            parts = data.split("|", 2)
+
+            if len(parts) != 3:
+                bot.answer_callback_query(
+                    call.id,
+                    "❌ بيانات الحذف غير صحيحة",
+                    show_alert=True
+                )
                 return
-            _,parent_key,sub_cb=parts
-            ok,msg=_delete_parent_everywhere(sub_cb)
-            bot.answer_callback_query(call.id,("✅ " if ok else "❌ ")+msg,show_alert=True)
+
+            _, parent_key, sub_cb = parts
+
+            ok, msg = _delete_parent_everywhere(sub_cb)
+
+            if not ok and parent_key:
+                ok, msg = _delete_parent_everywhere(parent_key)
+
+            bot.answer_callback_query(
+                call.id,
+                ("✅ " if ok else "❌ ") + msg,
+                show_alert=True
+            )
+
             if ok:
-                admin_panel_shortcut(chat_id,message_id)
+                admin_panel_shortcut(chat_id, message_id)
+
             return
 
         elif data.startswith('delsub_'):
