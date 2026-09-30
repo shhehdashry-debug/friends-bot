@@ -1399,61 +1399,83 @@ def _collect_subtree_keys(parent_key):
 
     return result
 
-def _remove_layout_references(keys, callbacks=None):
-    """ينظف مراجع العناصر المحذوفة من مدير ترتيب الأزرار فقط."""
-    keys = {str(x) for x in (keys or [])}
-    callbacks = {str(x) for x in (callbacks or [])}
-    if not keys and not callbacks:
-        return
-    try:
-        all_data = dict(_load_button_layouts())
-        changed = False
-        for menu_key, cfg in list(all_data.items()):
-            if not isinstance(cfg, dict):
-                continue
-            buttons = cfg.get("buttons", [])
-            if isinstance(buttons, list):
-                new_buttons = []
-                for b in buttons:
-                    cb = str(b.get("callback", "")) if isinstance(b, dict) else ""
-                    if cb in keys or cb in callbacks:
-                        changed = True
-                        continue
-                    new_buttons.append(b)
-                cfg["buttons"] = new_buttons
-            for field in ("order", "hidden"):
-                vals = cfg.get(field, [])
-                if isinstance(vals, list):
-                    new_vals = [str(x) for x in vals if str(x) not in keys and str(x) not in callbacks]
-                    if new_vals != vals:
-                        cfg[field] = new_vals
-                        changed = True
-            rows = cfg.get("rows", [])
-            if isinstance(rows, list):
-                new_rows = []
-                for row in rows:
-                    if not isinstance(row, list):
-                        continue
-                    nr = [str(x) for x in row if str(x) not in keys and str(x) not in callbacks]
-                    if nr:
-                        new_rows.append(nr)
-                    if nr != row:
-                        changed = True
-                cfg["rows"] = new_rows
-            all_data[menu_key] = cfg
-        if changed:
-            _save_button_layouts(all_data)
-    except Exception as e:
-        print(f"Layout cleanup warning: {e}")
-
-
 def _delete_parent_everywhere(parent_key):
-    """حذف موحد لأي أب حقيقي: قسم، زر مخصص، أو قسم فرعي."""
+    """حذف موحد وصحيح لأي أب: قسم، زر مخصص، أو قسم فرعي مع تنظيف كامل للمراجع."""
     parent_key = str(parent_key or "").strip()
     if not parent_key or parent_key in {"main", "our_services"}:
         return False, "هذا زر نظامي ولا يمكن حذفه."
 
-    # 1) قسم رئيسي من CATEGORIES
+    # 1) إذا كان زر مخصص (يبدأ بـ custom: أو يحتوي custom_menu|)
+    if parent_key.startswith("custom_menu|"):
+        parent_key = "custom:" + parent_key.split("|", 1)[1]
+
+    if parent_key.startswith("custom:"):
+        item_id = parent_key.split(":", 1)[1]
+        items = list(_load_custom_link_buttons())
+        item = next((x for x in items if str(x.get("id")) == item_id), None)
+        
+        # جمع شجرة الأقسام الفرعية المرتبطة بهذا الزر المخصص بالكامل
+        tree = _collect_subtree_keys(parent_key)
+        tree.update(_collect_subtree_keys(f"custom_menu|{item_id}"))
+        
+        service_keys = []
+        for sk, srv in list(SERVICES.items()):
+            if not isinstance(srv, dict):
+                continue
+            srv_cat = str(srv.get("category", ""))
+            srv_sub = str(srv.get("subcat", ""))
+            if srv_cat in {parent_key, f"custom_menu|{item_id}", item_id} or srv_sub in tree:
+                service_keys.append(sk)
+
+        for sk in service_keys:
+            SERVICES.pop(sk, None)
+
+        # تنظيف الأقسام الفرعية المرتبطة بهذا الزر بكل الصيغ الممكنة
+        keys_to_purge = tree | {parent_key, f"custom_menu|{item_id}", item_id}
+        for key in list(keys_to_purge):
+            SUB_CATEGORIES.pop(key, None)
+            
+        # إزالة أي أقسام فرعية تابعة له من خريطة SUB_CATEGORIES العامة
+        for owner_key in list(SUB_CATEGORIES.keys()):
+            subs = SUB_CATEGORIES[owner_key]
+            if isinstance(subs, list):
+                cleaned_subs = [
+                    s for s in subs 
+                    if isinstance(s, dict) and not any(alias in str(s.get("callback", "")) for alias in {item_id, parent_key})
+                ]
+                if cleaned_subs:
+                    SUB_CATEGORIES[owner_key] = cleaned_subs
+                else:
+                    SUB_CATEGORIES.pop(owner_key, None)
+
+        # حذف الزر من قائمة الأزرار المخصصة الأساسية
+        items = [x for x in items if str(x.get("id")) != item_id]
+        _save_custom_link_buttons(items)
+        _save_subcategories_to_db()
+
+        try:
+            custom_only = {k: v for k, v in SERVICES.items() if str(k).startswith("custom_srv_")}
+            supabase.table("settings").upsert({
+                "key": "custom_services_list",
+                "val_text": json.dumps(custom_only, ensure_ascii=False) if custom_only else ""
+            }, on_conflict="key").execute()
+        except Exception as e:
+            print(f"Custom parent delete sync warning: {e}")
+
+        # تنظيف الـ Layouts ومدير الترتيب تماماً من هذا الزر وكل مشتقاته لضمان عدم بقاء أي زر معلق
+        _remove_layout_references(keys_to_purge, callbacks=keys_to_purge | {f"custom_menu|{item_id}"})
+        
+        try:
+            if service_keys:
+                supabase.table("deleted_services").upsert(
+                    [{"srv_key": k} for k in service_keys], on_conflict="srv_key"
+                ).execute()
+        except Exception as e:
+            print(f"Delete custom parent DB warning: {e}")
+
+        return True, f"تم حذف الزر وكل ما بداخله بنجاح."
+
+    # 2) قسم رئيسي من CATEGORIES
     if parent_key in CATEGORIES:
         tree = _collect_subtree_keys(parent_key)
         service_keys = []
@@ -1481,82 +1503,15 @@ def _delete_parent_everywhere(parent_key):
             ).execute()
         except Exception as e:
             print(f"Delete category DB warning: {e}")
+            
         _save_categories_to_db()
         _save_subcategories_to_db()
-        try:
-            custom_only = {k:v for k,v in SERVICES.items() if str(k).startswith("custom_srv_")}
-            supabase.table("settings").upsert({
-                "key":"custom_services_list",
-                "val_text":json.dumps(custom_only,ensure_ascii=False) if custom_only else ""
-            }, on_conflict="key").execute()
-        except Exception as e:
-            print(f"Category delete custom services sync warning: {e}")
         _remove_layout_references(tree | {parent_key}, callbacks=tree | {parent_key})
         return True, f"تم حذف القسم ({cat_name}) وكل ما بداخله بنجاح."
 
-    # 2) زر مخصص
-    if parent_key.startswith("custom:"):
-        item_id = parent_key.split(":", 1)[1]
-        items = list(_load_custom_link_buttons())
-        item = next((x for x in items if str(x.get("id")) == item_id), None)
-        if not item:
-            return False, "الزر المخصص غير موجود."
+    # 3) قسم فرعي
+    if parent_key.startswith("sub_") or parent_key.startswith("sub:") or parent_key in SUB_CATEGORIES:
         tree = _collect_subtree_keys(parent_key)
-        service_keys = []
-        for sk, srv in list(SERVICES.items()):
-            if not isinstance(srv, dict):
-                continue
-            if str(srv.get("category", "")) == parent_key or str(srv.get("subcat", "")) in tree:
-                service_keys.append(sk)
-        for sk in service_keys:
-            SERVICES.pop(sk, None)
-        for key in list(tree):
-            SUB_CATEGORIES.pop(key, None)
-        items = [x for x in items if str(x.get("id")) != item_id]
-        _save_custom_link_buttons(items)
-        _save_subcategories_to_db()
-        try:
-            custom_only = {k:v for k,v in SERVICES.items() if str(k).startswith("custom_srv_")}
-            supabase.table("settings").upsert({
-                "key":"custom_services_list",
-                "val_text":json.dumps(custom_only,ensure_ascii=False) if custom_only else ""
-            }, on_conflict="key").execute()
-        except Exception as e:
-            print(f"Custom parent delete services sync warning: {e}")
-        _remove_layout_references({parent_key}, callbacks={f"custom_menu|{item_id}", parent_key} | tree)
-        try:
-            if service_keys:
-                supabase.table("deleted_services").upsert(
-                    [{"srv_key": k} for k in service_keys], on_conflict="srv_key"
-                ).execute()
-        except Exception as e:
-            print(f"Delete custom parent DB warning: {e}")
-        return True, f"تم حذف الزر ({item.get('name','زر مخصص')}) وكل ما بداخله بنجاح."
-
-    # 3) قسم فرعي مستقل أو متداخل خارج CATEGORIES
-    if (parent_key.startswith("sub_") or parent_key.startswith("sub:")
-            or parent_key in SUB_CATEGORIES):
-        normalized_parent = _normalize_sub_callback(parent_key)
-        aliases = _sub_aliases(parent_key)
-        owner = _find_sub_parent(parent_key)
-
-        # لا نعتمد على owner فقط؛ بعض الأقسام الفرعية القديمة/المتداخلة
-        # تكون محفوظة تحت sub:<callback> بدون أن يكون لها مفتاح مباشر.
-        referenced = any(
-            any(
-                isinstance(sub, dict)
-                and _normalize_sub_callback(sub.get("callback", "")) == normalized_parent
-                for sub in (subs or [])
-            )
-            for subs in SUB_CATEGORIES.values()
-        )
-        stored = any(alias in SUB_CATEGORIES for alias in aliases)
-        if owner is None and not referenced and not stored:
-            return False, "القسم غير موجود."
-
-        tree = _collect_subtree_keys(parent_key)
-        # الصيغتان تمثلان نفس القسم في النظام: callback=sub_x
-        # و storage-key=sub:sub_x. نستخدمهما معاً في التنظيف.
         service_keys = []
         for sk, srv in list(SERVICES.items()):
             if not isinstance(srv, dict):
@@ -1569,28 +1524,14 @@ def _delete_parent_everywhere(parent_key):
         for sk in service_keys:
             SERVICES.pop(sk, None)
 
-        # حذف كل مفاتيح التخزين الخاصة بالشجرة، بما فيها sub:<callback>.
         for key in list(tree):
             SUB_CATEGORIES.pop(key, None)
-
-        # إزالة مرجع القسم من قائمة الأب حتى لا يعود بعد إعادة التشغيل.
-        target_callbacks = set()
-        for key in tree:
-            cb = key[4:] if key.startswith("sub:") else key
-            if cb:
-                if not cb.startswith("sub_"):
-                    cb = "sub_" + cb
-                target_callbacks.add(cb)
 
         for owner_key, owner_subs in list(SUB_CATEGORIES.items()):
             cleaned = []
             for sub in owner_subs or []:
                 cb = str(sub.get("callback", "")).strip() if isinstance(sub, dict) else ""
-                if cb.startswith("sub:"):
-                    cb = cb[4:]
-                if cb and not cb.startswith("sub_"):
-                    cb = "sub_" + cb
-                if cb not in target_callbacks:
+                if not any(alias in cb for alias in tree):
                     cleaned.append(sub)
             if cleaned:
                 SUB_CATEGORIES[owner_key] = cleaned
@@ -1598,17 +1539,12 @@ def _delete_parent_everywhere(parent_key):
                 SUB_CATEGORIES.pop(owner_key, None)
 
         _save_subcategories_to_db()
-        _remove_layout_references(tree | target_callbacks, callbacks=tree | target_callbacks)
-        try:
-            if service_keys:
-                supabase.table("deleted_services").upsert(
-                    [{"srv_key": k} for k in service_keys], on_conflict="srv_key"
-                ).execute()
-        except Exception as e:
-            print(f"Delete subcategory DB warning: {e}")
+        _remove_layout_references(tree, callbacks=tree)
         return True, "تم حذف القسم الفرعي وكل ما بداخله بنجاح."
 
     return False, "هذا الزر نظامي أو غير قابل للحذف من هنا."
+
+
 
 
 def _sync_layout_label(callback_key, new_name):
