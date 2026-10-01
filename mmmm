@@ -1575,7 +1575,16 @@ def _delete_parent_everywhere(parent_key):
             for subs in SUB_CATEGORIES.values()
         )
         stored = any(alias in SUB_CATEGORIES for alias in aliases)
-        if owner is None and not referenced and not stored:
+        # قسم "شبحي": غير موجود في SUB_CATEGORIES لكن خدمات ما زالت تشير إليه عبر subcat.
+        # يجب أن يبقى قابلاً للحذف (مع خدماته اليتيمة) بدل رفضه بـ "غير موجود".
+        has_orphan_services = any(
+            isinstance(_s, dict) and (
+                str(_s.get("subcat", "") or "").strip() in aliases
+                or str(_s.get("category", "") or "").strip() in aliases
+            )
+            for _s in SERVICES.values()
+        )
+        if owner is None and not referenced and not stored and not has_orphan_services:
             return False, "القسم غير موجود."
 
         tree = _collect_subtree_keys(parent_key)
@@ -5438,6 +5447,12 @@ def query(call):
                     f"❌ حذف الزر بالكامل ({parent_name[:30]})",
                     callback_data=f"delcustomparent|{custom_id}",
                     style=get_item_style(f"custom_menu|{custom_id}")
+                ))
+            elif parent_key.startswith("sub_") and len(f"delsub2|{parent_key}|{parent_key}".encode("utf-8")) <= 64:
+                # يعيد استخدام معالج delsub2 الموجود: آخر جزء = القسم الفرعي المراد حذفه.
+                markup.add(types.InlineKeyboardButton(
+                    f"❌ حذف هذا القسم الفرعي بالكامل ({parent_name[:30]})",
+                    callback_data=f"delsub2|{parent_key}|{parent_key}"
                 ))
 
             if not _parent_services(parent_key) and not SUB_CATEGORIES.get(parent_key):
