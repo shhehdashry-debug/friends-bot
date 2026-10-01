@@ -1163,6 +1163,16 @@ try:
 except Exception as _e:
     print(f"Error restoring saved service prices: {_e}")
 
+# Restore edited descriptions (msg) of built-in services.
+try:
+    _rd = supabase.table("settings").select("key,val_text").like("key", "srvmsg_%").execute()
+    for _row in (_rd.data or []):
+        _sk = str(_row.get("key", ""))[len("srvmsg_"):]
+        if _sk in SERVICES and not _sk.startswith("custom_srv_") and _row.get("val_text"):
+            SERVICES[_sk]["msg"] = _row["val_text"]
+except Exception as _e:
+    print(f"Error restoring saved service descriptions: {_e}")
+
 CATEGORIES = {
     'cat_games': 'قسم الشحن والألعاب 🎮',
     'cat_insta': 'قسم الانستغرام 📸',
@@ -1318,6 +1328,26 @@ def _save_subcategories_to_db():
         return False
 
 
+def _persist_custom_services_list():
+    """يحفظ كل الخدمات المخصصة في settings (المصدر الذي يُحمَّل منه عند التشغيل)."""
+    custom_only = {k: v for k, v in SERVICES.items() if str(k).startswith("custom_srv_")}
+    supabase.table("settings").upsert({
+        "key": "custom_services_list",
+        "val_text": json.dumps(custom_only, ensure_ascii=False) if custom_only else ""
+    }, on_conflict="key").execute()
+
+
+def _persist_builtin_prices():
+    """يحفظ أسعار الخدمات الأصلية (price_<key>) لتُستعاد بعد إعادة التشغيل."""
+    rows = [
+        {"key": f"price_{k}", "val_text": str(v["price"])}
+        for k, v in SERVICES.items()
+        if not str(k).startswith("custom_srv_") and isinstance(v, dict) and "price" in v
+    ]
+    if rows:
+        supabase.table("settings").upsert(rows, on_conflict="key").execute()
+
+
 def _normalize_sub_callback(value):
     """يوحّد كل صيغ مفاتيح الأقسام الفرعية إلى callback واحد."""
     v = str(value or "").strip()
@@ -1355,6 +1385,15 @@ def _find_sub_parent(sub_callback):
 
 def _collect_subtree_keys(parent_key):
     """يجمع القسم وكل الأبناء مهما اختلفت صيغة التخزين (sub_x / sub:sub_x)."""
+    raw_root = str(parent_key or "").strip()
+    if raw_root and (raw_root in CATEGORIES or raw_root.startswith("custom:")):
+        # قسم رئيسي أو زر مخصص: أبناؤه مخزنون تحت مفتاحه مباشرة (وليس sub_<مفتاح>).
+        result = {raw_root}
+        for sub in SUB_CATEGORIES.get(raw_root, []) or []:
+            if isinstance(sub, dict):
+                result |= _collect_subtree_keys(sub.get("callback", ""))
+        return result
+
     root_cb = _normalize_sub_callback(parent_key)
     if not root_cb:
         return set()
@@ -1446,7 +1485,7 @@ def _delete_parent_everywhere(parent_key):
                 continue
             cat = str(srv.get("category", ""))
             sub = str(srv.get("subcat", ""))
-            if cat == parent_key or sub in tree:
+            if cat == parent_key or sub in tree or cat in tree:
                 service_keys.append(sk)
 
         cat_name = CATEGORIES.pop(parent_key)
@@ -1490,7 +1529,8 @@ def _delete_parent_everywhere(parent_key):
         for sk, srv in list(SERVICES.items()):
             if not isinstance(srv, dict):
                 continue
-            if str(srv.get("category", "")) == parent_key or str(srv.get("subcat", "")) in tree:
+            if (str(srv.get("category", "")) == parent_key or str(srv.get("subcat", "")) in tree
+                    or str(srv.get("category", "")) in tree):
                 service_keys.append(sk)
         for sk in service_keys:
             SERVICES.pop(sk, None)
@@ -1640,10 +1680,13 @@ def _rename_parent_everywhere(parent_key, new_name):
         _sync_custom_button_name_to_layouts(item_id, new_name)
         return True, new_name
 
+    if parent_key.startswith("sub:"):
+        parent_key = _normalize_sub_callback(parent_key)
+
     if parent_key.startswith("sub_"):
         for subs in SUB_CATEGORIES.values():
             for sub in subs or []:
-                if isinstance(sub, dict) and str(sub.get("callback", "")) == parent_key:
+                if isinstance(sub, dict) and _normalize_sub_callback(sub.get("callback", "")) == parent_key:
                     sub["name"] = new_name
                     _save_subcategories_to_db()
                     _sync_layout_label(parent_key, new_name)
@@ -2675,7 +2718,8 @@ def load_manual_services_from_supabase_table():
                     continue
                 try:
                     s_dict = json.loads(s_data_str)
-                    if isinstance(s_dict, dict):
+                    # الخدمة المحمّلة من settings هي الأحدث؛ صف الجدول قد يكون نسخة قديمة.
+                    if isinstance(s_dict, dict) and s_key not in SERVICES:
                         SERVICES[s_key] = s_dict
                 except Exception as parse_err:
                     print(f"Error parsing manual service {s_key}: {parse_err}")
@@ -6134,6 +6178,41 @@ def query(call):
                         real_cb = 'custom:' + cb.split('|', 1)[1]
                     if real_cb in known or cb in known:
                         selected.append((real_cb, labels.get(cb, known.get(cb, cb))))
+                # أي قسم رئيسي جديد لم يدخل الـlayout بعد يجب أن يظهر؛ وإلا يُحفظ
+                # فعلاً لكنه لا يظهر في "خدماتنا" (الأقسام المخفية تبقى مخفية).
+                _sel_keys = {p for p, _ in selected}
+                _new_cats = [(str(k), str(v)) for k, v in CATEGORIES.items()
+                             if str(k) not in _sel_keys and str(k) not in hidden]
+                if _new_cats:
+                    # تظهر قبل زر الرجوع، ونثبّتها في الـlayout المحفوظ ليبقى ترتيبها بعد إعادة التشغيل.
+                    _bi = next((i for i, (p, _) in enumerate(selected) if p == 'start'), len(selected))
+                    selected[_bi:_bi] = _new_cats
+                    try:
+                        _all_lay = dict(_load_button_layouts())
+                        _c = dict(_all_lay.get('our_services', {}))
+                        _ord = [str(x) for x in (_c.get('order') or [])]
+                        _rows = [list(r) for r in (_c.get('rows') or []) if isinstance(r, list)]
+                        _btns = list(_c.get('buttons') or [])
+                        _btn_cbs = {str(b.get('callback')) for b in _btns if isinstance(b, dict)}
+                        for _ck, _cn in _new_cats:
+                            if _ord and _ck not in _ord:
+                                _ord.insert(_ord.index('start') if 'start' in _ord else len(_ord), _ck)
+                            if _rows and not any(_ck in r for r in _rows):
+                                _ri = next((i for i, r in enumerate(_rows) if r == ['start']), len(_rows))
+                                _rows.insert(_ri, [_ck])
+                            if _ck not in _btn_cbs:
+                                _bj = next((i for i, b in enumerate(_btns)
+                                            if isinstance(b, dict) and str(b.get('callback')) == 'start'), len(_btns))
+                                _btns.insert(_bj, {'callback': _ck, 'text': _cn})
+                        if _ord:
+                            _c['order'] = _ord
+                        if _rows:
+                            _c['rows'] = _rows
+                        _c['buttons'] = _btns
+                        _all_lay['our_services'] = _c
+                        _save_button_layouts(_all_lay)
+                    except Exception as _lay_err:
+                        print(f"our_services layout update warning: {_lay_err}")
             else:
                 # توافق مع النسخ القديمة: إذا لم توجد إعدادات لخدماتنا،
                 # اعرض الأقسام الرئيسية فقط، ولا تسحب الآباء من الخدمات الأخرى.
@@ -6181,7 +6260,8 @@ def query(call):
                 found_items = True
 
             for srv_key, srv in _parent_services(data).items():
-                if srv.get("subcat"):
+                # الخدمة التي subcat الخاص بها هو هذه الصفحة تظهر هنا؛ وغيرها تظهر في صفحتها.
+                if srv.get("subcat") and str(srv.get("subcat")) != str(data):
                     continue
                 if not is_item_in_maintenance(srv_key) or chat_id == ADMIN_ID:
                     txt = service_button_text(srv, "📦")
@@ -6988,6 +7068,14 @@ def process_admin_edit_service_desc(message):
                 }, on_conflict="key").execute()
             except Exception as e:
                 print(f"Error updating custom service msg in DB: {e}")
+        else:
+            try:
+                supabase.table("settings").upsert({
+                    "key": f"srvmsg_{service_key}",
+                    "val_text": new_desc
+                }, on_conflict="key").execute()
+            except Exception as e:
+                print(f"Error saving built-in service description: {e}")
 
         bot.send_message(chat_id, f"✅ **تم تحديث وصف الخدمة بنجاح!**\n\n📝 الوصف الجديد:\n{new_desc}", parse_mode="Markdown")
     else:
@@ -7213,7 +7301,11 @@ def step_add_category_name(message):
         temp_add_service.pop(chat_id, None)
         return
     CATEGORIES[cat_key] = cat_name
-    _save_categories_to_db()
+    if not _save_categories_to_db():
+        CATEGORIES.pop(cat_key, None)
+        bot.send_message(chat_id, "❌ تعذّر حفظ القسم في قاعدة البيانات، لم تتم الإضافة. حاول مرة أخرى.")
+        temp_add_service.pop(chat_id, None)
+        return
     try:
         supabase.table("deleted_categories").delete().eq("cat_key", cat_key).execute()
     except Exception:
@@ -7245,13 +7337,16 @@ def step_subcat_name(message):
         'callback': sub_key_id
     })
 
-    try:
-        supabase.table("settings").upsert({
-            "key": "custom_sub_categories",
-            "val_text": json.dumps(SUB_CATEGORIES, ensure_ascii=False)
-        }, on_conflict="key").execute()
-    except Exception as e:
-        print(f"Error saving sub categories: {e}")
+    if not _save_subcategories_to_db():
+        try:
+            SUB_CATEGORIES[cat_key] = [x for x in SUB_CATEGORIES.get(cat_key, []) if x.get('callback') != sub_key_id]
+            if not SUB_CATEGORIES[cat_key]:
+                SUB_CATEGORIES.pop(cat_key, None)
+        except Exception:
+            pass
+        bot.send_message(chat_id, "❌ تعذّر حفظ القسم الفرعي في قاعدة البيانات، لم تتم الإضافة. حاول مرة أخرى.")
+        temp_add_service.pop(chat_id, None)
+        return
 
     bot.send_message(
         chat_id,
@@ -7376,7 +7471,10 @@ def step_srv_save_final(message):
             bot.register_next_step_handler(msg, step_srv_save_final)
             return
             
-        key = f"custom_srv_{int(time.time())}"
+        _ts = int(time.time())
+        while f"custom_srv_{_ts}" in SERVICES:
+            _ts += 1
+        key = f"custom_srv_{_ts}"
         SERVICES[key] = {
             'name': srv['name'], 
             'btn_label': srv['name'][:30],
@@ -7629,7 +7727,10 @@ def step_manual_srv_save_final(message):
     subcat_val = srv.get("subcat")
 
     try:
-        key = f"custom_srv_{int(time.time())}"
+        _ts = int(time.time())
+        while f"custom_srv_{_ts}" in SERVICES:
+            _ts += 1
+        key = f"custom_srv_{_ts}"
 
         if manual_type == "financing":
             # 💰 تمويل: كمية + وصف اختياري : سعر، بعدة أسطر.
@@ -7836,8 +7937,19 @@ def process_update_single_price(message, service_key):
         old_price = SERVICES[service_key].get('price', 0)
         SERVICES[service_key]['price'] = new_price
 
+        # خدمة بتيرات: السعر الظاهر على الزر هو أقل تير، لذلك نُعدّل كل التيرات بنفس النسبة.
+        _tiers = SERVICES[service_key].get('tiers')
+        if isinstance(_tiers, list) and _tiers:
+            _cur_min = min((float(t.get('price', 0)) for t in _tiers if isinstance(t, dict)), default=0)
+            if _cur_min > 0:
+                _ratio = new_price / _cur_min
+                for t in _tiers:
+                    if isinstance(t, dict):
+                        t['price'] = round(float(t.get('price', 0)) * _ratio, 2)
+
         try:
             if service_key.startswith("custom_srv_"):
+                _persist_custom_services_list()
                 supabase.table("custom_services").upsert({
                     "service_key": service_key,
                     "category": SERVICES[service_key].get("category"),
@@ -7875,12 +7987,13 @@ def process_update_bulk_price_decrease(message):
                 for tier in SERVICES[k]['tiers']:
                     tier['price'] = max(0.1, round(tier['price'] * multiplier, 2))
 
-        custom_only = {k: v for k, v in SERVICES.items() if k.startswith('custom_srv_')}
-        if custom_only:
-            supabase.table("settings").upsert({
-                "key": "custom_services_list", 
-                "val_text": json.dumps(custom_only, ensure_ascii=False)
-            }, on_conflict="key").execute()
+        try:
+            _persist_custom_services_list()
+            _persist_builtin_prices()
+        except Exception as db_err:
+            print(f"Bulk price persistence error: {db_err}")
+            bot.send_message(message.chat.id, "⚠️ تم تطبيق النسبة لكن تعذّر حفظها في قاعدة البيانات، وقد تعود الأسعار القديمة بعد إعادة التشغيل.")
+            return
 
         bot.send_message(message.chat.id, f"✅ **تم خفض جميع أسعار البوت بنسبة ({pct}%) بنجاح!**", parse_mode="Markdown")
     except ValueError:
@@ -7901,12 +8014,13 @@ def process_update_bulk_price_increase(message):
                 for tier in SERVICES[k]['tiers']:
                     tier['price'] = round(tier['price'] * multiplier, 2)
 
-        custom_only = {k: v for k, v in SERVICES.items() if k.startswith('custom_srv_')}
-        if custom_only:
-            supabase.table("settings").upsert({
-                "key": "custom_services_list", 
-                "val_text": json.dumps(custom_only, ensure_ascii=False)
-            }, on_conflict="key").execute()
+        try:
+            _persist_custom_services_list()
+            _persist_builtin_prices()
+        except Exception as db_err:
+            print(f"Bulk price persistence error: {db_err}")
+            bot.send_message(message.chat.id, "⚠️ تم تطبيق النسبة لكن تعذّر حفظها في قاعدة البيانات، وقد تعود الأسعار القديمة بعد إعادة التشغيل.")
+            return
 
         bot.send_message(message.chat.id, f"✅ **تم زيادة جميع أسعار البوت بنسبة ({pct}%) بنجاح!**", parse_mode="Markdown")
     except ValueError:
