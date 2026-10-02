@@ -400,12 +400,22 @@ def get_service_min_max(service_id):
         response = http_session.post(API_URL, data=payload, timeout=15)
         services = response.json()
         if isinstance(services, list):
+            found = None
             for srv in services:
+                if not isinstance(srv, dict):
+                    continue
+                try:
+                    # قيمة فارغة/None/نص عشري من المزود لا تُسقط الدالة كلها.
+                    min_q = int(float(srv.get('min') or 1))
+                    max_q = int(float(srv.get('max') or 1000000))
+                except (TypeError, ValueError):
+                    continue
+                # طلب واحد يملأ الكاش لكل الخدمات بدل إعادة جلب القائمة لكل ضغطة.
+                SERVICE_LIMITS_CACHE[str(srv.get('service'))] = (now, min_q, max_q)
                 if str(srv.get('service')) == key:
-                    min_q = int(srv.get('min', 1))
-                    max_q = int(srv.get('max', 1000000))
-                    SERVICE_LIMITS_CACHE[key] = (now, min_q, max_q)
-                    return min_q, max_q
+                    found = (min_q, max_q)
+            if found:
+                return found
     except Exception as e:
         print(f"Error fetching min/max: {e}")
     return (cached[1], cached[2]) if cached else (1, 1000000)
@@ -970,13 +980,40 @@ def get_service_price(user_id, base_price):
 # ==========================================
 # دالة التخفيضات التلقائية للكميات الكبيرة
 # ==========================================
-def calculate_bulk_discount_price(base_rate_per_1000, quantity):
-    """حساب سعر الكمية مع خصم الكميات، قبل خصم رتبة المستخدم."""
+def _tier_rate_per_1000(tiers, quantity):
+    """سعر الألف حسب جدول التيرات: يُستخدم تير أكبر كمية <= الكمية المطلوبة.
+    مثال: 1000=8 و 10000=70 => 10000 تُسعَّر 7 لكل ألف (الإجمالي 70).
+    ترجع None إذا لم يوجد جدول صالح."""
+    valid = []
+    for t in (tiers or []):
+        try:
+            tq, tp = int(t['qty']), float(t['price'])
+        except (TypeError, ValueError, KeyError):
+            continue
+        if tq > 0 and tp > 0:
+            valid.append((tq, tp / tq * 1000.0))
+    if not valid:
+        return None
+    valid.sort()
+    rate = valid[0][1]  # أقل من أصغر تير: بدون خصم، بسعر أصغر تير
+    for tq, r in valid:
+        if tq <= quantity:
+            rate = r
+    return rate
+
+
+def calculate_bulk_discount_price(base_rate_per_1000, quantity, tiers=None):
+    """حساب سعر الكمية مع خصم الكميات، قبل خصم رتبة المستخدم.
+    إذا مُرِّر tiers صالح يُحسب السعر منه (وهو ما حدده الأدمن)، وإلا تُطبَّق النسب القديمة."""
     try:
         base_rate = float(base_rate_per_1000 or 0)
         qty = int(quantity)
     except (TypeError, ValueError):
         return 0.0
+
+    tier_rate = _tier_rate_per_1000(tiers, qty) if tiers else None
+    if tier_rate is not None:
+        return round((qty / 1000.0) * tier_rate, 2)
 
     if qty >= 20000:
         discount_pct = 10
@@ -7521,7 +7558,7 @@ def process_generic_custom_qty(message, base_service_key):
         return
 
     try:
-        qty = int(message.text.strip())
+        qty = int((message.text or "").strip())
         service_data = SERVICES.get(base_service_key)
         
         markup_back = types.InlineKeyboardMarkup()
@@ -7545,17 +7582,27 @@ def process_generic_custom_qty(message, base_service_key):
             bot.send_message(chat_id, "❌ تعذر العثور على بيانات الخدمة.", reply_markup=markup_back)
             return
 
-        if 'tiers' in service_data and service_data['tiers']:
-            first_tier = service_data['tiers'][0]
-            price_per_1000 = (first_tier['price'] / first_tier['qty']) * 1000
-        else:
-            price_per_1000 = service_data.get('price', 1.0)
+        # نفس مصدر التيرات الذي تستعمله أزرار الشراء (tiers ثم custom_tiers).
+        tiers_list = service_data.get('tiers') or service_data.get('custom_tiers') or []
+        price_per_1000 = service_data.get('price', 1.0)
+        if tiers_list:
+            try:
+                first_tier = tiers_list[0]
+                price_per_1000 = (float(first_tier['price']) / float(first_tier['qty'])) * 1000
+            except (TypeError, ValueError, KeyError, ZeroDivisionError):
+                price_per_1000 = service_data.get('price', 1.0)
 
-        # خصم الكميات: 5% من 5000، 7% من 10000، 10% من 20000.
-        cost_for_qty = calculate_bulk_discount_price(price_per_1000, qty)
+        # إذا للخدمة تيرات (مثل 1k=8 و 10k=70) يُسعَّر منها مباشرة؛ وإلا تبقى النسب القديمة.
+        cost_for_qty = calculate_bulk_discount_price(price_per_1000, qty, tiers_list)
         final_price = get_service_price(chat_id, cost_for_qty)
         bulk_note = ""
-        if qty >= 20000:
+        _tier_rate = _tier_rate_per_1000(tiers_list, qty) if tiers_list else None
+        if _tier_rate is not None:
+            _base_rate = _tier_rate_per_1000(tiers_list, 0)
+            if _base_rate and _tier_rate < _base_rate:
+                _pct = round((1 - _tier_rate / _base_rate) * 100, 1)
+                bulk_note = f"\n🎯 خصم كمية: {_pct:g}%"
+        elif qty >= 20000:
             bulk_note = "\n🎯 خصم كمية: 10%"
         elif qty >= 10000:
             bulk_note = "\n🎯 خصم كمية: 7%"
@@ -7587,6 +7634,8 @@ def process_generic_custom_qty(message, base_service_key):
         markup_back = types.InlineKeyboardMarkup()
         markup_back.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='our_services', style=get_item_style('our_services')))
         bot.send_message(chat_id, "⚠️ يرجى إدخال أرقام صحيحة فقط:", reply_markup=markup_back)
+        # بدون هذا السطر تتوقف الخطوة بعد أول إدخال خاطئ ولا تُقرأ الرسالة التالية ككمية.
+        bot.register_next_step_handler(message, process_generic_custom_qty, base_service_key)
 
 def cancel_operation_markup():
     """لوحة زر إلغاء العملية المستخدمة أثناء إدخالات الأدمن."""
